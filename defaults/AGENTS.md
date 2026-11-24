@@ -977,11 +977,22 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
 ### AI team workflow (`team`)
 
 AI Hub's shipped `team` mod opens from the sidebar's **AI 팀** or the command
-palette, or `herdr-app do mod.open --name team`. It runs an ordered local team:
-plan (Claude Code), implement (Codex), review (Claude Code), verify (Gemini CLI).
-The person can choose an installed agent, edit instructions, and disable roles.
+palette, or `herdr-app do mod.open --name team`. It runs an ordered local team.
+Defaults: plan (Claude Code), implement (OpenCode Go, model
+`opencode-go/deepseek-v4.1-flash`), review (Codex), verify (Claude Code).
+The person can add/remove/reorder 1–8 roles and edit their name, installed agent,
+model, instructions and `access` (`read` advisory or `write` implementation).
+At least one role must remain enabled. Model IDs are bounded data, not arguments.
+Explicit models are supported for Claude Code, Codex and OpenCode; blank means
+the configured CLI default. OpenCode model IDs include the provider prefix.
+Its list comes from `opencode models` in the selected project; selecting a model
+does not prove account access or the actual model used by a provider alias.
+The Go alias above maps to DeepSeek V4.1 Flash 1017 in the official catalog checked
+on 2026-11-24; it does not pin a dated snapshot indefinitely.
 Role settings are copied into each new run; editing defaults does not rewrite an
-existing run. Each CLI needs its own installation and login. Read-only role
+existing run. Only untouched legacy default profiles migrate automatically;
+customized profiles and existing run assignments are preserved. Each CLI needs
+its own installation and login. Read-only role
 instructions are prompts, not an OS sandbox.
 
 Only local absolute project folders are supported by this version. Roles share
@@ -990,6 +1001,14 @@ and exact `aihub.run`, `aihub.stage`, `aihub.attempt`, `herdr.space`, `herdr.tab
 labels. Keep the program's configured arguments and permission prompts. Do not
 add permission-bypass flags. Never retry an uncertain launch blindly: locate the
 original terminal by its labels before deciding what happened.
+
+Before starting OpenCode with a chosen model, require its exact ID in the local
+model list and inspect CLI help for supported model/prompt flags. The root TUI
+is used when supported; otherwise a supported `mini` interface is used. An
+explicit configured `run` mode is retained. Never append the task as a root
+positional argument: that means a project path. Use a direct `opencode` executable
+(including Windows shims); refuse wrappers or ambiguous positional arguments.
+Do not silently substitute providers/models or add auto-approval flags.
 
 `shared.json` key `ai-hub.team.v1` holds profiles and up to 20 recent runs.
 Prompts and reports live at `<project>/.ai-hub/team/<runId>/<stageId>-<attempt>.md`

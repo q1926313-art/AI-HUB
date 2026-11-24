@@ -2,6 +2,18 @@
 
 <!-- AI Hub fork modification, 2026-11-24. Earlier entries below are retained upstream history. -->
 
+## [0.1.17-aihub.3] - 2026-11-24
+<!-- spotlight -->
+
+### New
+- **역할과 담당 모델을 직접 구성합니다.** 역할 이름·순서·지침을 바꾸고, 최대 8개 역할을 추가·삭제하며, 담당 도구와 모델을 지정할 수 있습니다.
+- **OpenCode Go의 DeepSeek를 사용합니다.** 기본 구성은 Claude 계획, OpenCode Go DeepSeek V4.1 Flash 구현, Codex 검토, Claude 검증입니다. 역할 설정에서 OpenCode 모델 목록을 불러와 선택할 수 있습니다.
+- **역할별 작업 방식을 정합니다.** 자문·검토 또는 구현·수정을 선택해 지침을 전달하고, 진행 화면과 내보낸 기록에 지정한 모델을 남깁니다.
+
+### Fixed
+- OpenCode에 작업 지시가 프로젝트 경로로 전달되지 않도록 전용 시작 방식을 사용합니다.
+- 역할 순서를 바꾸거나 추가할 때 편집 중인 이름·모델·지침을 보존하고, 저장하지 않은 설정은 이동 전에 확인하도록 했습니다.
+
 ## [0.1.17-aihub.2] - 2026-11-24
 <!-- spotlight -->
 

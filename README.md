@@ -35,11 +35,19 @@ AI Hub는 [Herdr 데스크톱 앱](https://github.com/herdrdev/herdr-app) `0.1.1
 | 순서 | 기본 담당 | 하는 일 |
 |---|---|---|
 | 계획 | Claude Code | 요청 범위와 구현 순서, 확인 기준 정리 |
-| 구현 | Codex | 코드 변경과 필요한 검사 실행 |
-| 검토 | Claude Code | 변경 내용과 회귀 가능성 검토 |
-| 검증 | Gemini CLI | 검사 결과와 남은 문제 확인 |
+| 구현 | OpenCode Go · DeepSeek V4.1 Flash | 코드 변경과 필요한 검사 실행 |
+| 검토 | Codex | 변경 내용과 회귀 가능성 검토 |
+| 검증 | Claude Code | 검사 결과와 남은 문제 확인 |
 
-**역할 설정**에서 담당 도구와 지침을 바꾸거나 필요 없는 역할을 끌 수 있습니다.
+**역할 설정**에서 역할 이름·순서·지침·작업 방식을 바꾸고, 최대 8개 역할을 추가·삭제하거나 끌 수 있습니다.
+담당 도구와 모델도 역할마다 지정합니다. OpenCode는 설치된 CLI의 모델 목록을 불러와 선택하거나
+정확한 `provider/model` 값을 입력할 수 있습니다. Claude Code·Codex는 모델 이름을 직접 지정할 수 있습니다.
+
+기본 DeepSeek 선택값은 `opencode-go/deepseek-v4.1-flash`입니다.
+[공식 Go 모델 목록](https://models.opencode.ai/providers/opencode-go/)에서 2026-11-24에
+**DeepSeek V4.1 Flash 1017**로 확인한 모델입니다. 이 API 이름은 제공자의 별칭이므로
+향후에도 1017 버전을 고정한다는 뜻은 아닙니다.
+
 각 도구는 해당 PC에 설치하고 로그인해야 합니다. 계획·검토·검증의 기본 읽기 전용 지침은
 AI에 전달되는 요청이며 운영체제의 쓰기 권한을 제한하는 장치는 아닙니다.
 

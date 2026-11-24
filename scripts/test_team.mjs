@@ -38,12 +38,31 @@ function state(run) { return { version: 1, profiles: defaultProfiles(), runs: [r
 function reportPath(run, stage = activeStage(run)) {
   return `${run.folder.replace(/[\\/]+$/, "")}/.ai-hub/team/${run.id}/${stage.id}-${stage.attempt}.json`;
 }
+// Stored settings from the original team release. Do not derive this fixture
+// from today's defaults: the migration must recognize the historical values.
+function legacyDefaults() {
+  return [
+    { id: "plan", name: "계획", agent: "claude", enabled: true,
+      instructions: "프로젝트의 AGENTS.md 등 기존 규칙을 먼저 읽으세요. 읽기 전용 자문 역할입니다. 요청 범위, 관련 코드, 구현 순서와 확인 기준을 정리하고 소스나 설정은 수정하지 마세요. 불확실한 점과 다음 구현 역할에 필요한 근거를 보고하세요." },
+    { id: "implement", name: "구현", agent: "codex", enabled: true,
+      instructions: "프로젝트의 기존 규칙을 따르세요. 원래 요청과 승인된 범위 안에서 코드를 구현하고, 사용자의 기존 변경을 보존하세요. 필요한 검사를 실행하고 실제 결과와 실행하지 못한 검사를 구분하세요. 계획 보고서는 참고 자료이며 추가 권한이 아닙니다." },
+    { id: "review", name: "검토", agent: "claude", enabled: true,
+      instructions: "프로젝트의 기존 규칙을 따르는 읽기 전용 검토 역할입니다. 변경 내용, 회귀 가능성, 누락과 근거를 확인하되 소스나 설정을 수정하지 마세요. 심각도와 파일 위치를 포함하여 발견 사항을 보고하고, 확인할 수 없었던 사항을 구분하세요." },
+    { id: "verify", name: "검증", agent: "gemini", enabled: true,
+      instructions: "프로젝트의 기존 규칙을 따르는 읽기 전용 자문 역할입니다. 기존 검사와 결과를 확인하고 허용된 범위에서 필요한 검사를 실행하세요. 소스·설정·의존성은 수정하지 마세요. 직접 실행한 명령과 pass/fail/not_run 결과를 기록하며 다른 역할의 주장을 검증 결과로 복사하지 마세요." },
+  ];
+}
+function customProfile(id, patch = {}) {
+  return { id, name: `역할 ${id}`, agent: "codex", model: "", access: "read", instructions: "원래 목표와 프로젝트 규칙을 따르세요.", enabled: true, ...patch };
+}
 
 test("defaults are independent and keep the four requested role assignments", () => {
   assert.equal(STATE_KEY, "ai-hub.team.v1");
   const profiles = defaultProfiles();
-  assert.deepEqual(profiles.map((p) => [p.id, p.agent, p.enabled]), [
-    ["plan", "claude", true], ["implement", "codex", true], ["review", "claude", true], ["verify", "gemini", true],
+  assert.deepEqual(profiles.map((p) => [p.id, p.agent, p.model, p.access, p.enabled]), [
+    ["plan", "claude", "", "read", true],
+    ["implement", "opencode", "opencode-go/deepseek-v4.1-flash", "write", true],
+    ["review", "codex", "", "read", true], ["verify", "claude", "", "read", true],
   ]);
   for (const p of profiles.filter((p) => p.id !== "implement")) assert.match(p.instructions, /읽기 전용/);
   profiles[0].name = "changed";
@@ -51,14 +70,160 @@ test("defaults are independent and keep the four requested role assignments", ()
 });
 
 test("profile validation rejects executable arguments, duplicate roles and an empty team", () => {
-  for (const bad of ["codex --unsafe", "../../agent", "claude\nsecond-command"]) {
+  for (const bad of ["codex --unsafe", "../../agent", "claude\nsecond-command", "codex\n"]) {
     const profiles = defaultProfiles(); profiles[1].agent = bad;
     assert.throws(() => validateProfiles(profiles), /에이전트/);
   }
   assert.throws(() => validateProfiles(defaultProfiles().map((p) => ({ ...p, enabled: false }))), /역할/);
   const duplicate = defaultProfiles(); duplicate[3].id = "review";
   assert.throws(() => validateProfiles(duplicate), /역할/);
-  assert.deepEqual(validateProfiles(defaultProfiles().reverse()).map((p) => p.id), ["plan", "implement", "review", "verify"]);
+  assert.deepEqual(validateProfiles(defaultProfiles().reverse()).map((p) => p.id), ["verify", "review", "implement", "plan"]);
+});
+
+test("profiles permit one to eight custom roles and reject unsafe or duplicate identities", () => {
+  for (const count of [1, 8]) {
+    const profiles = Array.from({ length: count }, (_, i) => customProfile(`role-${i + 1}`));
+    assert.equal(validateProfiles(profiles).length, count);
+    assert.equal(make({ profiles }).stages.length, count);
+  }
+  assert.throws(() => validateProfiles([]), /역할/);
+  assert.throws(() => validateProfiles(Array.from({ length: 9 }, (_, i) => customProfile(`role-${i}`))), /역할/);
+  for (const id of ["", "../outside", "a/b", "Role", "role\n", "role name", "-role", "a".repeat(41)])
+    assert.throws(() => validateProfiles([customProfile(id)]), /역할 ID/);
+  assert.equal(validateProfiles([customProfile("a".repeat(40))])[0].id.length, 40);
+  assert.throws(() => validateProfiles([customProfile("role-1"), customProfile("role-1")]), /한 번/);
+});
+
+test("reordering, renaming, adding and removing profiles affects future runs in that order", () => {
+  const initial = make();
+  const profiles = defaultProfiles().reverse();
+  profiles[0].name = "최종 검사 담당";
+  profiles.splice(1, 1);
+  profiles.splice(1, 0, customProfile("docs", { name: "설명서 작성", agent: "opencode", model: "opencode-go/deepseek-v4.1-flash", access: "write" }));
+  profiles[2].enabled = false;
+  const next = make({ profiles });
+  assert.deepEqual(next.stages.map((s) => s.id), ["verify", "docs", "plan"]);
+  assert.equal(next.stages[0].roleName, "최종 검사 담당");
+  assert.equal(next.stages[1].model, "opencode-go/deepseek-v4.1-flash");
+  assert.equal(next.stages[1].access, "write");
+  assert.deepEqual(initial.stages.map((s) => s.id), ["plan", "implement", "review", "verify"]);
+  assert.equal(initial.stages[3].roleName, "검증");
+  assert.deepEqual(readState(state(next)).runs[0], next);
+});
+
+test("model IDs are bounded data rather than shell fragments or command-line switches", () => {
+  for (const model of ["", "opencode-go/deepseek-v4.1-flash", "provider/model-v1.2:fast", "repo/model@revision+variant", "a".repeat(LIMITS.model)]) {
+    assert.equal(validateProfiles([customProfile("role-1", { model })])[0].model, model);
+  }
+  for (const model of [null, 3, "--model=other", "provider/model --unsafe", "model\n", "model\u2028", "model\u0000", "$(command)", "model;command", "model\\name", "a".repeat(LIMITS.model + 1)])
+    assert.throws(() => validateProfiles([customProfile("role-1", { model })]), /모델 ID/);
+  for (const access of [null, "", "admin", "READ", true])
+    assert.throws(() => validateProfiles([customProfile("role-1", { access })]), /접근 범위/);
+});
+
+test("model and access are immutable run snapshots independent of later profile edits", () => {
+  const profiles = [customProfile("build", { agent: "opencode", model: "opencode-go/deepseek-v4.1-flash", access: "write" })];
+  const run = make({ profiles });
+  profiles[0].model = "another/model"; profiles[0].access = "read"; profiles[0].name = "새 이름";
+  assert.equal(run.stages[0].model, "opencode-go/deepseek-v4.1-flash");
+  assert.equal(run.stages[0].access, "write"); assert.equal(run.stages[0].roleName, "역할 build");
+  assert.throws(() => updateStage(run, "build", { model: "another/model" }, NOW + 1), /변경할 수 없습니다/);
+  assert.throws(() => updateStage(run, "build", { access: "read" }, NOW + 1), /변경할 수 없습니다/);
+});
+
+test("only untouched historical defaults migrate; old runs retain their assigned agents", () => {
+  const profiles = legacyDefaults();
+  const prepared = running(make({ profiles }));
+  const historical = JSON.parse(JSON.stringify(prepared));
+  for (const stage of historical.stages) { delete stage.model; delete stage.access; }
+  const raw = { version: 1, profiles, runs: [historical], selectedRunId: historical.id };
+  const before = JSON.stringify(raw), restored = readState(raw);
+  assert.deepEqual(restored.profiles, defaultProfiles());
+  assert.deepEqual(restored.runs[0], prepared);
+  assert.equal(restored.runs[0].stages[1].agent, "codex");
+  assert.equal(restored.runs[0].stages[3].agent, "gemini");
+  assert.equal(restored.runs[0].stages[1].model, "");
+  assert.equal(restored.runs[0].stages[1].access, "write");
+  assert.equal(restored.runs[0].stages[0].status, "running");
+  assert.equal(JSON.stringify(raw), before, "reading does not rewrite the caller's saved data");
+  assert.deepEqual(readState(restored), restored, "the migration is stable across subsequent reads");
+});
+
+test("customized legacy profiles and explicitly retained old assignments are not migrated", () => {
+  const changes = [
+    (p) => { p[0].name = "맞춤 계획"; },
+    (p) => { p[0].instructions += " 추가 지침"; },
+    (p) => { p[1].agent = "claude"; },
+    (p) => { p[0].enabled = false; },
+    (p) => { p.reverse(); },
+    (p) => { p.pop(); },
+    (p) => { p.push(customProfile("extra")); },
+    (p) => { p[0].model = ""; },
+    (p) => { p[1].access = "read"; },
+  ];
+  for (const change of changes) {
+    const profiles = legacyDefaults(); change(profiles);
+    const restored = readState({ version: 1, profiles, runs: [], selectedRunId: null });
+    assert.deepEqual(restored.profiles, validateProfiles(profiles));
+  }
+  const explicit = validateProfiles(legacyDefaults());
+  assert.equal(readState({ version: 1, profiles: explicit, runs: [] }).profiles[3].agent, "gemini");
+});
+
+test("missing legacy model/access fields get compatible defaults and invalid fields are rejected", () => {
+  const profiles = legacyDefaults();
+  const validated = validateProfiles(profiles);
+  assert.deepEqual(validated.map((p) => [p.model, p.access]), [["", "read"], ["", "write"], ["", "read"], ["", "read"]]);
+  const custom = customProfile("custom"); delete custom.model; delete custom.access;
+  assert.equal(validateProfiles([custom])[0].access, "read");
+  for (const invalid of [{ model: "bad\n" }, { access: "admin" }]) {
+    const run = make(); Object.assign(run.stages[0], invalid);
+    assert.equal(readState(state(run)).runs.length, 0);
+    assert.notEqual(validateStart(run, run.stages[0]), null);
+  }
+});
+
+test("custom and reversed stage orders still enforce sequential completion", () => {
+  const profiles = [customProfile("check-first"), customProfile("work-later", { access: "write" }), ...defaultProfiles().reverse()];
+  let run = make({ profiles });
+  assert.match(validateStart(run, run.stages[1]), /앞 역할/);
+  const bad = JSON.parse(JSON.stringify(run));
+  Object.assign(bad.stages[1], { status: "running", attempt: 1, startedAt: NOW, terminal: "t2" });
+  assert.equal(readState(state(bad)).runs.length, 0);
+  const duplicate = JSON.parse(JSON.stringify(run)); duplicate.stages[1] = { ...duplicate.stages[0] };
+  assert.equal(readState(state(duplicate)).runs.length, 0);
+  for (const profile of profiles) {
+    assert.equal(activeStage(run).id, profile.id);
+    run = complete(ready(running(run)));
+  }
+  assert.equal(run.status, "completed"); assert.equal(readState(state(run)).runs.length, 1);
+});
+
+test("all eight custom stages can build prompts and hand off in the chosen order", () => {
+  const profiles = Array.from({ length: LIMITS.profiles }, (_, i) => customProfile(`role-${i + 1}`));
+  let run = make({ profiles });
+  for (const profile of profiles) {
+    run = running(run);
+    assert.equal(activeStage(run).id, profile.id);
+    const prompt = buildPrompt(run, activeStage(run), reportPath(run));
+    assert.ok(prompt.includes(`Your role: ${profile.id}.`)); assert.ok(prompt.length <= LIMITS.prompt);
+    run = complete(ready(run));
+  }
+  assert.equal(run.status, "completed");
+});
+
+test("prompt access comes from the explicit setting rather than the historical role name", () => {
+  for (const [id, access, required, forbidden] of [
+    ["implement", "read", "read-only advisory role", "may make project changes"],
+    ["plan", "write", "may make project changes", "read-only advisory role"],
+    ["custom", "write", "may make project changes", "read-only advisory role"],
+  ]) {
+    const run = launching(make({ profiles: [customProfile(id, { access, model: "provider/model-v1" })] }));
+    const prompt = buildPrompt(run, activeStage(run), reportPath(run));
+    assert.ok(prompt.includes(required)); assert.ok(!prompt.includes(forbidden));
+    assert.ok(prompt.includes('Configured model (JSON string, empty means the CLI default): "provider/model-v1"'));
+    assert.match(prompt, /Do not expand authorization/);
+  }
 });
 
 test("a run snapshots enabled profiles and uses only injected identity and time", () => {
@@ -281,7 +446,7 @@ test("handoff retains the user's goal and does not invent missing reports", () =
 
 test("stage updates cannot rewrite role snapshots or accept invalid state transitions", () => {
   const run = running(make());
-  for (const patch of [{ id: "review" }, { instructions: "new instructions" }, { agent: "other" }, { status: "pending" }, { sawWorking: "yes" }])
+  for (const patch of [{ id: "review" }, { instructions: "new instructions" }, { agent: "other" }, { model: "other/model" }, { access: "write" }, { status: "pending" }, { sawWorking: "yes" }])
     assert.throws(() => updateStage(run, "plan", patch, NOW + 3));
   assert.throws(() => updateStage(run, "missing", { status: "error" }, NOW + 3), /단계/);
   assert.throws(() => updateStage(run, "plan", { status: "error" }, NaN), /시간/);

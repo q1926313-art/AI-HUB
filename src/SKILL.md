@@ -135,10 +135,20 @@ also follows the sub-agent tree, stopping at any child with a pane or a
 
 Open AI Hub's **AI 팀** from the sidebar or command palette, or with
 `herdr-app do mod.open --name team`. The person sets a local project, goal, and
-role profiles. Defaults are Claude Code for planning/review, Codex for
-implementation, and Gemini CLI for verification. Roles run sequentially, with
+role profiles. Defaults are Claude Code for planning/verification, OpenCode Go
+DeepSeek V4.1 Flash (`opencode-go/deepseek-v4.1-flash`) for implementation, and
+Codex for review. Names, order, tools, models, access instructions and role
+instructions are editable; the person can add/remove 1–8 roles. Roles run sequentially, with
 structured reports passed to the next role. Each CLI needs installation/login.
 Read-only role instructions are prompts, not filesystem enforcement.
+
+OpenCode's model list is loaded with `opencode models` in the selected project.
+The chosen provider/model ID must be present before launch. CLI help determines
+whether root or `mini` supports both model and prompt flags; an explicitly
+configured `run` is retained. Do not silently substitute a different provider or
+model. A catalog entry is not proof of account access, and a provider alias does
+not promise a permanently pinned model version. Profile changes affect new runs;
+existing assignments stay as recorded.
 
 The panel supports manual handoff (default), optional automatic progression,
 report review/editing, terminal inspection, and Markdown export. Reported test

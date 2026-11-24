@@ -21,7 +21,7 @@ import uuid
 
 
 REPO = Path(__file__).resolve().parent.parent
-SCENARIOS = ("empty", "draft", "running", "ready", "error", "history", "profiles")
+SCENARIOS = ("empty", "draft", "running", "ready", "error", "history", "profiles", "models")
 
 
 def fixture_entry(scenario: str) -> str:
@@ -35,15 +35,60 @@ export default class NativeTeamFixture extends Team {
     const scenario = SCENARIO;
     const now = 1700000000000;
     const profiles = defaultProfiles();
-    if (scenario === 'profiles') {
+    if (scenario === 'profiles' || scenario === 'models') {
       this.screen = 'profiles';
-      this.agentPicker = 'plan';
       this.agentsLoading = false;
       this.agents = [
         { key: 'claude', name: 'Claude Code', installed: true },
         { key: 'codex', name: 'Codex', installed: false },
-        { key: 'gemini', name: 'Gemini CLI', installed: true },
+        { key: 'opencode', name: 'OpenCode', installed: true },
       ];
+      if (scenario === 'profiles') {
+        // Exercise native editor values and a non-default role count/order.
+        // Input/Textarea values are not included in --print-spec, so check
+        // them through the same native state API that the shipped view uses.
+        const customId = 'custom-check';
+        this.setProfileEditors([
+          { ...profiles.find((profile) => profile.id === 'implement') },
+          { ...profiles.find((profile) => profile.id === 'plan') },
+          {
+            id: customId, name: 'Native role before edit', agent: 'opencode',
+            model: '', access: 'read', enabled: true,
+            instructions: 'Native instructions before edit.',
+          },
+        ]);
+        this.profileNames[customId].set_value('Native custom validation');
+        this.profileModels[customId].set_value('opencode-go/deepseek-v4.1-flash');
+        this.profileInputs[customId].set_value('Native custom instructions after editing.');
+        this.moveRole(customId, -1, cx);
+        this.moveRole(customId, -1, cx);
+        const edited = this.collectProfiles();
+        if (edited.map((profile) => profile.id).join(',') !== 'custom-check,implement,plan'
+          || edited[0].name !== 'Native custom validation'
+          || edited[0].agent !== 'opencode'
+          || edited[0].model !== 'opencode-go/deepseek-v4.1-flash'
+          || edited[0].instructions !== 'Native custom instructions after editing.'
+          || edited[0].access !== 'read' || edited[1].access !== 'write'
+          || !this.profilesDirty) {
+          throw new Error('Native custom role edits or order were not preserved.');
+        }
+        this.agentPicker = customId;
+      } else {
+        this.modelCatalogs.opencode = {
+          models: [
+            { id: 'opencode-go/deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash 1017' },
+            { id: 'fixture-provider/unrelated-model', name: 'Native unrelated model' },
+          ],
+          loading: false, error: null, loaded: true,
+        };
+        this.modelPicker = 'implement';
+        this.modelSearchInputs.implement.set_value('dEePsEeK');
+        if (this.profileModels.implement.value() !== 'opencode-go/deepseek-v4.1-flash'
+          || this.modelSearchInputs.implement.value() !== 'dEePsEeK'
+          || this.profilesDirty) {
+          throw new Error('Native model search changed the saved role or lost its model ID.');
+        }
+      }
       return;
     }
     let run = createRun({
@@ -174,8 +219,22 @@ def main() -> int:
                 expected = ["AI 팀"]
                 if scenario == "empty":
                     expected.extend(["어떤 일을 함께 할까요?", "AI 팀 시작"])
-                elif scenario == "profiles":
-                    expected.extend(["역할별 도구와 지침", "역할 저장", "설치 필요"])
+                elif scenario in ("profiles", "models"):
+                    expected.extend([
+                        "역할별 도구와 지침", "역할 저장", "설치 필요", "OpenCode",
+                        "Input #", "Textarea #", "자문·검토", "구현·수정",
+                    ])
+                    if scenario == "profiles":
+                        expected.extend([
+                            "3/8개 역할", "저장하지 않은 변경사항", "↑ 위로", "↓ 아래로", "역할 삭제",
+                            "team-profile-custom-check", "team-profile-implement", "team-profile-plan",
+                        ])
+                    else:
+                        expected.extend([
+                            "모델 목록 다시 불러오기", "1개 검색 결과 · 전체 2개",
+                            "DeepSeek V4.1 Flash 1017", "opencode-go/deepseek-v4.1-flash",
+                            "team-model-option-implement-0", "저장된 역할 설정",
+                        ])
                 else:
                     expected.append(f"Native {scenario} fixture")
                 if scenario == "ready":
@@ -187,6 +246,14 @@ def main() -> int:
                 for value in expected:
                     if value not in stdout:
                         errors.append(f"expected content is missing from the description: {value}")
+                if scenario == "profiles":
+                    positions = [stdout.find(f"team-profile-{role}") for role in ("custom-check", "implement", "plan")]
+                    if min(positions) < 0 or positions != sorted(positions):
+                        errors.append("the description did not preserve the custom role order")
+                if scenario == "models":
+                    for value in ("Native unrelated model", "fixture-provider/unrelated-model"):
+                        if value in stdout:
+                            errors.append(f"model search exposed an unrelated result: {value}")
                 if "check: mod " in stdout + stderr:
                     errors.append("the checking view attempted a real process or file-write side effect")
                 result = {"name": scenario, "exit_code": code, "passed": not errors, "errors": errors}

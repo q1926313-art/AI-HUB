@@ -1,4 +1,4 @@
-// AI Hub (2026-11-24): native team workspace. Agents report work; people review handoffs.
+// AI Hub (2026-11-24): configurable native team roles, model choices, and reviewed handoffs.
 import { View, div, svg } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import {
@@ -8,7 +8,10 @@ import {
 import { defaultProfiles, readState, activeStage, nextStage } from "./model.js";
 import { createRuntime } from "./runtime.js";
 
-const TOOL_NAMES = { claude: "Claude Code", codex: "Codex", gemini: "Gemini CLI" };
+const TOOL_NAMES = { claude: "Claude Code", codex: "Codex", opencode: "OpenCode" };
+const MODEL_TOOLS = new Set(["claude", "codex", "opencode"]);
+const MAX_ROLES = 8;
+const MODEL_RESULTS = 60;
 const STATUS = {
   draft: "시작 전", pending: "대기", launching: "시작 중", running: "실행 중",
   ready: "보고서 확인 필요", completed: "인수인계 완료", blocked: "확인 필요",
@@ -54,6 +57,8 @@ export default class Team extends View {
     this.agentsLoading = !this.isCheck;
     this.agentsError = null;
     this.agentPicker = null;
+    this.modelPicker = null;
+    this.modelCatalogs = {};
     this.profilesDirty = false;
     this.reportEditing = false;
     this.reportDirty = false;
@@ -104,16 +109,171 @@ export default class Team extends View {
   }
 
   setProfileEditors(profiles) {
-    for (const input of Object.values(this.profileInputs ?? {})) input.release();
-    this.profileDraft = copy(profiles ?? defaultProfiles());
-    this.profileInputs = {};
-    for (const profile of this.profileDraft) {
-      const input = TextareaState.new({ value: profile.instructions, rows: 3 });
-      input.on("change", (_event, cx) => { this.profilesDirty = true; this.notice = null; cx.notify(); });
-      this.profileInputs[profile.id] = input;
+    for (const inputs of [this.profileInputs, this.profileNames, this.profileModels, this.modelSearchInputs]) {
+      for (const input of Object.values(inputs ?? {})) input.release();
     }
+    this.profileDraft = copy(profiles ?? defaultProfiles()).map((profile) => ({
+      ...profile, model: profile.model ?? "", access: profile.access ?? (profile.id === "implement" ? "write" : "read"),
+    }));
+    this.profileInputs = {};
+    this.profileNames = {};
+    this.profileModels = {};
+    this.modelSearchInputs = {};
+    for (const profile of this.profileDraft) this.createProfileEditors(profile);
+    this.profileBaseline = JSON.stringify(this.collectProfiles());
     this.profilesDirty = false;
     this.agentPicker = null;
+    this.modelPicker = null;
+  }
+
+  createProfileEditors(profile) {
+    const id = profile.id;
+    this.profileNames[id] = InputState.new({ value: profile.name, placeholder: "역할 이름" });
+    this.profileModels[id] = InputState.new({ value: profile.model ?? "", placeholder: profile.agent === "opencode" ? "provider/model 전체 ID" : "비워 두면 도구의 기본 모델" });
+    this.profileInputs[id] = TextareaState.new({ value: profile.instructions, rows: 3 });
+    this.modelSearchInputs[id] = InputState.new({ placeholder: "모델 이름 또는 전체 ID 검색" });
+    for (const input of [this.profileNames[id], this.profileModels[id], this.profileInputs[id]]) {
+      input.on("change", (_event, cx) => { this.updateProfilesDirty(); this.notice = null; this.error = null; cx.notify(); });
+    }
+    this.modelSearchInputs[id].on("change", (_event, cx) => cx.notify());
+  }
+
+  collectProfiles() {
+    return this.profileDraft.map((profile) => ({
+      ...profile,
+      name: this.profileNames[profile.id]?.value() ?? profile.name,
+      model: this.profileModels[profile.id]?.value() ?? profile.model ?? "",
+      instructions: this.profileInputs[profile.id]?.value() ?? profile.instructions,
+    }));
+  }
+
+  captureProfileEdits() {
+    const values = this.collectProfiles();
+    // Keep each role object and native text state alive when order changes.
+    this.profileDraft.forEach((profile, index) => Object.assign(profile, values[index]));
+  }
+
+  updateProfilesDirty() {
+    this.profilesDirty = JSON.stringify(this.collectProfiles()) !== this.profileBaseline;
+  }
+
+  addRole(cx) {
+    if (this.busy || this.profileDraft.length >= MAX_ROLES) return;
+    this.captureProfileEdits();
+    let index = 1;
+    while (this.profileDraft.some((profile) => profile.id === `role-${index}`)) index++;
+    const profile = {
+      id: `role-${index}`, name: "새 역할", agent: "codex", model: "", access: "read", enabled: true,
+      instructions: "프로젝트 지침과 작업 목표를 확인하고 맡은 역할을 수행하세요. 결과, 확인한 근거와 남은 문제를 인수인계 보고서에 정리하세요.",
+    };
+    this.profileDraft.push(profile);
+    this.createProfileEditors(profile);
+    this.updateProfilesDirty();
+    this.notice = null;
+    this.error = null;
+    this.profileNames[profile.id].focus();
+    cx.notify();
+  }
+
+  moveRole(id, direction, cx) {
+    if (this.busy) return;
+    const index = this.profileDraft.findIndex((profile) => profile.id === id);
+    const target = index + direction;
+    if (index < 0 || target < 0 || target >= this.profileDraft.length) return;
+    this.captureProfileEdits();
+    [this.profileDraft[index], this.profileDraft[target]] = [this.profileDraft[target], this.profileDraft[index]];
+    this.updateProfilesDirty();
+    this.notice = null;
+    cx.notify();
+  }
+
+  removeRole(id, cx) {
+    if (this.busy || this.profileDraft.length <= 1) return;
+    this.captureProfileEdits();
+    this.profileDraft = this.profileDraft.filter((profile) => profile.id !== id);
+    for (const inputs of [this.profileInputs, this.profileNames, this.profileModels, this.modelSearchInputs]) {
+      inputs[id]?.release();
+      delete inputs[id];
+    }
+    if (this.agentPicker === id) this.agentPicker = null;
+    if (this.modelPicker === id) this.modelPicker = null;
+    this.updateProfilesDirty();
+    this.notice = "역할을 목록에서 제외했습니다. 저장 전에는 변경 취소로 되돌릴 수 있습니다.";
+    cx.notify();
+  }
+
+  selectAgent(id, agent, cx) {
+    if (this.busy) return;
+    this.captureProfileEdits();
+    const profile = this.profileDraft.find((entry) => entry.id === id);
+    if (!profile) return;
+    if (profile.agent !== agent) {
+      profile.agent = agent;
+      profile.model = "";
+      this.profileModels[id].set_value("");
+      this.modelSearchInputs[id].set_value("");
+      this.notice = MODEL_TOOLS.has(agent) ? "담당 도구를 바꿨습니다. 사용할 모델을 다시 선택하거나 기본 모델을 사용하세요." : "담당 도구를 바꿨습니다. 이 도구는 기본 모델로 실행됩니다.";
+    }
+    this.agentPicker = null;
+    this.modelPicker = null;
+    this.updateProfilesDirty();
+    cx.notify();
+  }
+
+  loadModels(profile, cx) {
+    if (this.isCheck || this.closed || this.busy || profile.agent !== "opencode") return;
+    const agent = profile.agent;
+    if (this.modelCatalogs[agent]?.loading) return;
+    const previous = this.modelCatalogs[agent];
+    const folder = this.folderInput.value().trim() || this.currentRun()?.folder || undefined;
+    const request = { models: previous?.models ?? [], loaded: Boolean(previous?.loaded), loading: true, error: null, folder };
+    this.modelCatalogs[agent] = request;
+    this.modelPicker = profile.id;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const models = await this.runtime.listModels({ agent, folder, refresh: Boolean(previous?.loaded) });
+        if (this.closed || this.modelCatalogs[agent] !== request) return;
+        const seen = new Set();
+        request.models = models.filter((model) => typeof model?.id === "string" && model.id && !seen.has(model.id) && (seen.add(model.id) || true));
+        request.loaded = true;
+      } catch (error) { request.error = message(error); }
+      request.loading = false;
+      cx.notify();
+    });
+  }
+
+  selectModel(profileId, modelId, cx) {
+    if (this.busy || this.profileDraft.find((profile) => profile.id === profileId)?.agent !== "opencode" || !this.profileModels[profileId]) return;
+    this.profileModels[profileId].set_value(modelId);
+    this.updateProfilesDirty();
+    this.modelPicker = null;
+    this.notice = "선택한 모델 ID를 적용하려면 역할 설정을 저장하세요.";
+    cx.notify();
+  }
+
+  discardProfiles(cx) {
+    if (this.busy) return;
+    this.setProfileEditors(this.runtime ? this.runtime.getState().profiles : this.state.profiles);
+    this.error = null;
+    this.notice = "저장 전 역할 변경을 취소했습니다.";
+    cx.notify();
+  }
+
+  allowNavigation(target, cx) {
+    if (this.profilesDirty && target !== "profiles") {
+      this.screen = "profiles";
+      this.error = "역할 설정을 저장하거나 변경 취소 후 이동해 주세요.";
+      cx?.notify();
+      return false;
+    }
+    if (this.reportDirty && target !== "run") {
+      this.screen = "run";
+      this.error = "편집한 보고서를 저장하거나 편집 취소 후 이동해 주세요.";
+      cx?.notify();
+      return false;
+    }
+    return true;
   }
 
   setReportEditor(stage) {
@@ -152,17 +312,14 @@ export default class Team extends View {
   }
 
   dismiss(cx) {
-    if (this.reportDirty) {
-      this.error = "편집한 보고서를 저장하거나 편집 취소 후 창을 닫아 주세요.";
-      cx?.notify();
-      return;
-    }
+    if (!this.allowNavigation(null, cx)) return;
     this.stopAutomatic();
     const id = props()?.overlay;
     if (id) closeOverlay(id);
   }
 
   navigate(screen, cx) {
+    if (!this.allowNavigation(screen, cx)) return;
     this.screen = screen;
     this.notice = null;
     this.error = null;
@@ -236,6 +393,7 @@ export default class Team extends View {
   }
 
   start(cx) {
+    if (!this.allowNavigation("new", cx)) return;
     const input = {
       title: this.titleInput.value().trim(), goal: this.goalInput.value().trim(),
       folder: this.folderInput.value().trim(), spaceId: this.projectSpaceId,
@@ -257,6 +415,7 @@ export default class Team extends View {
 
   openRun(id, cx) {
     if (this.isCheck || this.busy) return;
+    if (!this.allowNavigation("run", cx)) return;
     if (this.reportDirty) {
       this.error = "편집한 보고서를 저장하거나 편집 취소 후 다른 기록을 열어 주세요.";
       cx.notify();
@@ -328,10 +487,10 @@ export default class Team extends View {
   }
 
   saveProfiles(cx) {
-    const profiles = this.profileDraft.map((profile) => ({ ...profile, instructions: this.profileInputs[profile.id].value() }));
+    const profiles = this.collectProfiles();
     this.perform(cx, "역할 설정 저장 중…", () => {
-      this.runtime.saveProfiles(profiles);
-      this.profilesDirty = false;
+      const saved = this.runtime.saveProfiles(profiles);
+      this.setProfileEditors(saved);
       this.notice = "역할 설정을 저장했습니다. 새로 시작하는 팀 작업에 적용됩니다.";
     });
   }
@@ -355,6 +514,14 @@ export default class Team extends View {
 
   toolName(key) {
     return this.agents.find((agent) => agent.key === key)?.name ?? TOOL_NAMES[key] ?? key;
+  }
+
+  assignee(profile) {
+    return `${this.toolName(profile.agent)} · ${profile.model || "도구 기본 모델"}`;
+  }
+
+  accessName(access) {
+    return access === "write" ? "구현·수정" : "자문·검토";
   }
 
   toolHint(key) {
@@ -423,8 +590,12 @@ export default class Team extends View {
           .child(this.button(t, "team-edit-roles", "역할 설정", (cx) => this.navigate("profiles", cx), { small: true })))
         .children(profiles.map((profile, index) => h_flex().px(12).py(9).gap(10).items_center().rounded(7).bg(t.raised)
           .child(div().size(23).flex_none().rounded(6).bg(t.background).text_color(t.accent).text_size(11).flex().items_center().justify_center().child(String(index + 1)))
-          .child(div().flex_1().text_size(12).text_color(t.foreground).child(profile.name))
-          .child(div().text_size(12).text_color(t.muted).child(this.toolName(profile.agent)))
+          .child(v_flex().flex_1().min_w(0).gap(4)
+            .child(div().text_size(12).text_color(t.foreground).child(profile.name))
+            .child(div().text_size(10.5).text_color(t.dim).child(this.accessName(profile.access))))
+          .child(v_flex().flex_1().min_w(0).gap(4)
+            .child(div().text_size(12).text_color(t.muted).child(this.toolName(profile.agent)))
+            .child(div().id(`team-summary-model-${profile.id}`).truncate().tooltip(profile.model || "도구 기본 모델").text_size(10.5).text_color(t.dim).child(profile.model || "도구 기본 모델")))
           .child(div().w(70).text_right().text_size(10.5).text_color(this.toolHint(profile.agent) === "설치 필요" ? t.blocked : t.dim).child(this.toolHint(profile.agent))))))
       .child(this.toggle(t, "team-new-auto", this.newAuto, "보고서가 준비되면 다음 역할 자동 실행", (cx) => { this.newAuto = !this.newAuto; cx.notify(); },
         "기본은 직접 확인 후 진행입니다. 자동 실행 중에도 보고서에 차단 이슈가 있으면 멈춥니다."))
@@ -438,42 +609,103 @@ export default class Team extends View {
     return v_flex().id(`team-tools-${profile.id}`).h(Math.min(200, choices.length * 32 + 8)).min_h(0).overflow_y_scrollbar().p(4).gap(2).rounded(7).border_1().border_color(t.border).bg(t.background)
       .children(choices.map((agent) => h_flex().id(`team-tool-${profile.id}-${agent.key}`).h(30).flex_none().px(9).gap(10).rounded(5).items_center().cursor_pointer()
         .bg(agent.key === profile.agent ? t.selected : t.background).hover((style) => style.bg(t.hover))
-        .on_click((_event, cx) => {
-          profile.agent = agent.key; this.agentPicker = null; this.profilesDirty = true; this.notice = null; cx.notify();
-        })
+        .on_click((_event, cx) => this.selectAgent(profile.id, agent.key, cx))
         .child(div().w(14).text_color(t.accent).child(agent.key === profile.agent ? "✓" : ""))
         .child(div().flex_1().text_size(12).text_color(t.foreground).child(agent.name))
         .child(div().text_size(10.5).text_color(agent.installed === false ? t.blocked : t.dim).child(agent.installed === null ? "설치 확인 전" : agent.installed ? "사용 가능" : "설치 필요"))));
+  }
+
+  modelChoices(profile, t) {
+    const catalog = this.modelCatalogs[profile.agent] ?? { models: [], loading: false, loaded: false, error: null };
+    const query = this.modelSearchInputs[profile.id].value().trim().toLowerCase();
+    const matches = catalog.models.filter((model) => !query || `${model.name ?? ""} ${model.id}`.toLowerCase().includes(query));
+    const shown = matches.slice(0, MODEL_RESULTS);
+    const selected = this.profileModels[profile.id].value().trim();
+    return v_flex().p(10).gap(8).rounded(7).border_1().border_color(t.border).bg(t.background)
+      .child(this.field(t, Input.new(this.modelSearchInputs[profile.id])).h(36))
+      .child(div().text_size(10.5).text_color(t.dim).child(`${matches.length}개 검색 결과 · 전체 ${catalog.models.length}개${matches.length > MODEL_RESULTS ? ` · 처음 ${MODEL_RESULTS}개 표시, 검색어로 좁혀 주세요` : ""}`))
+      .when(Boolean(catalog.error), (element) => element.child(div().text_size(11).text_color(t.blocked).child(catalog.error)))
+      .when(!shown.length, (element) => element.child(div().py(8).text_size(12).text_color(t.muted).child(catalog.loading ? "OpenCode에서 모델 목록을 확인하고 있습니다…" : query ? "일치하는 모델이 없습니다. 다른 검색어나 정확한 ID를 입력하세요." : "조회된 모델이 없습니다. 모델 목록을 불러오거나 정확한 ID를 직접 입력하세요.")))
+      .when(Boolean(shown.length), (element) => element.child(v_flex().id(`team-model-list-${profile.id}`).h(Math.min(276, shown.length * 47 + 4)).min_h(0).overflow_y_scrollbar().gap(3)
+        .children(shown.map((model, index) => h_flex().id(`team-model-option-${profile.id}-${index}`).h(44).flex_none().px(9).gap(8).items_center().rounded(5)
+          .bg(model.id === selected ? t.selected : t.background).hover((style) => style.bg(t.hover)).cursor_pointer()
+          .on_click((_event, cx) => this.selectModel(profile.id, model.id, cx))
+          .child(div().flex_none().w(14).text_color(t.accent).child(model.id === selected ? "✓" : ""))
+          .child(v_flex().flex_1().min_w(0).gap(3)
+            .child(div().text_size(12).text_color(t.foreground).child(model.name || model.id))
+            .child(div().id(`team-model-id-${profile.id}-${index}`).truncate().tooltip(model.id).text_size(10.5).text_color(t.dim).child(model.id)))))));
+  }
+
+  profileView(profile, index, t) {
+    const supported = MODEL_TOOLS.has(profile.agent);
+    const catalog = this.modelCatalogs[profile.agent];
+    const currentModel = this.profileModels[profile.id].value();
+    return v_flex().id(`team-profile-${profile.id}`).p(14).gap(12).rounded(9).border_1().border_color(t.border).bg(t.raised)
+      .child(h_flex().gap(9).items_center()
+        .child(div().size(25).flex_none().rounded(6).bg(t.background).text_color(t.accent).text_size(11).flex().items_center().justify_center().child(String(index + 1)))
+        .child(div().flex_1().min_w(0).child(this.field(t, Input.new(this.profileNames[profile.id])).h(36)))
+        .child(this.button(t, `team-profile-toggle-${profile.id}`, profile.enabled !== false ? "사용 중" : "제외됨", (cx) => {
+          profile.enabled = profile.enabled === false; this.updateProfilesDirty(); this.notice = null; cx.notify();
+        }, { small: true })))
+      .child(h_flex().gap(6).items_center()
+        .child(this.button(t, `team-role-up-${profile.id}`, "↑ 위로", (cx) => this.moveRole(profile.id, -1, cx), { small: true, disabled: index === 0 }))
+        .child(this.button(t, `team-role-down-${profile.id}`, "↓ 아래로", (cx) => this.moveRole(profile.id, 1, cx), { small: true, disabled: index === this.profileDraft.length - 1 }))
+        .child(div().flex_1())
+        .child(this.button(t, `team-role-remove-${profile.id}`, "역할 삭제", (cx) => this.removeRole(profile.id, cx), { small: true, danger: true, disabled: this.profileDraft.length <= 1 })))
+      .child(h_flex().gap(10).items_center()
+        .child(div().text_size(11).text_color(t.muted).child("담당 도구"))
+        .child(this.button(t, `team-profile-agent-${profile.id}`, `${this.toolName(profile.agent)}  ▾`, (cx) => {
+          this.agentPicker = this.agentPicker === profile.id ? null : profile.id; this.modelPicker = null; cx.notify();
+        }, { small: true }))
+        .child(div().text_size(10.5).text_color(this.toolHint(profile.agent) === "설치 필요" ? t.blocked : t.dim).child(this.toolHint(profile.agent))))
+      .when(this.agentPicker === profile.id, (element) => element.child(this.agentChoices(profile, t)))
+      .child(v_flex().gap(7)
+        .child(this.label(t, "담당 모델", supported ? "빈 값은 도구의 기본 모델" : "이 도구는 기본 모델 사용"))
+        .when(supported, (element) => element.child(this.field(t, Input.new(this.profileModels[profile.id])).h(36)))
+        .when(!supported, (element) => element.child(h_flex().gap(8).items_center()
+          .child(div().flex_1().text_size(12).text_color(t.muted).child("도구 기본 모델"))
+          .when(Boolean(currentModel), (row) => row.child(this.button(t, `team-model-clear-${profile.id}`, "이전 모델 지정 지우기", (cx) => {
+            this.profileModels[profile.id].set_value(""); this.updateProfilesDirty(); cx.notify();
+          }, { small: true })))))
+        .when(profile.agent === "opencode", (element) => element
+          .child(h_flex().gap(8).items_center().flex_wrap()
+            .child(this.button(t, `team-model-load-${profile.id}`, catalog?.loading ? "모델 목록 확인 중…" : catalog?.loaded ? "모델 목록 다시 불러오기" : "모델 목록 불러오기", (cx) => this.loadModels(profile, cx), { small: true, disabled: Boolean(catalog?.loading) }))
+            .when(Boolean(catalog?.loaded), (row) => row.child(this.button(t, `team-model-toggle-${profile.id}`, this.modelPicker === profile.id ? "목록 닫기" : "목록 보기", (cx) => {
+              this.modelPicker = this.modelPicker === profile.id ? null : profile.id; this.agentPicker = null; cx.notify();
+            }, { small: true }))))
+          .child(div().text_size(10.5).text_color(t.dim).child("OpenCode에 표시되는 provider/model 전체 ID를 그대로 사용합니다."))
+          .when(this.modelPicker === profile.id, (row) => row.child(this.modelChoices(profile, t)))))
+      .child(v_flex().gap(5)
+        .child(this.label(t, "작업 방식"))
+        .child(h_flex().gap(7).items_center()
+          .children([["read", "자문·검토"], ["write", "구현·수정"]].map(([access, label]) => this.button(t, `team-access-${profile.id}-${access}`, label, (cx) => {
+            profile.access = access; this.updateProfilesDirty(); this.notice = null; cx.notify();
+          }, { small: true, primary: profile.access === access })))))
+      .child(v_flex().child(this.label(t, "역할 지침")).child(this.field(t, Textarea.new(this.profileInputs[profile.id])).h(100)));
   }
 
   profilesView(t) {
     return v_flex().flex_1().min_h(0)
       .child(v_flex().id("team-profiles-scroll").flex_1().min_h(0).overflow_y_scrollbar().p(22).gap(14)
         .child(v_flex().gap(5).child(div().text_size(19).font_semibold().text_color(t.foreground).child("역할별 도구와 지침"))
-          .child(div().text_size(12).text_color(t.muted).child("순서대로 넘겨받을 역할을 설정하세요. 저장한 설정은 새 작업에 적용됩니다.")))
+          .child(div().text_size(12).text_color(t.muted).child("1~8개의 역할을 원하는 이름과 순서로 구성하세요. 저장한 설정은 새 작업에 적용됩니다."))
+          .child(div().text_size(11).text_color(t.dim).child("작업 방식은 AI에게 전달하는 역할 지침이며 운영체제 권한을 바꾸지 않습니다. 모델 지정은 Claude Code·Codex·OpenCode에서 지원합니다.")))
         .child(h_flex().gap(10).items_center()
           .child(this.button(t, "team-agent-refresh", this.agentsLoading ? "도구 확인 중…" : "설치된 도구 다시 확인", (cx) => this.loadAgents(cx), { small: true, disabled: this.agentsLoading }))
+          .child(div().flex_1())
+          .child(div().text_size(11).text_color(t.dim).child(`${this.profileDraft.length}/${MAX_ROLES}개 역할`))
+          .child(this.button(t, "team-role-add", "+ 역할 추가", (cx) => this.addRole(cx), { small: true, disabled: this.profileDraft.length >= MAX_ROLES })))
+        .child(v_flex()
           .when(Boolean(this.agentsError), (element) => element.child(div().flex_1().text_size(11).text_color(t.blocked).child(`도구 확인 실패: ${this.agentsError}`))))
-        .children(this.profileDraft.map((profile, index) => v_flex().p(14).gap(10).rounded(9).border_1().border_color(t.border).bg(t.raised)
-          .child(h_flex().gap(9).items_center()
-            .child(div().size(24).rounded(6).bg(t.background).text_color(t.accent).text_size(11).flex().items_center().justify_center().child(String(index + 1)))
-            .child(div().flex_1().text_size(13).font_semibold().text_color(t.foreground).child(profile.name))
-            .child(this.button(t, `team-profile-toggle-${profile.id}`, profile.enabled !== false ? "사용 중" : "제외됨", (cx) => {
-              profile.enabled = profile.enabled === false; this.profilesDirty = true; cx.notify();
-            }, { small: true })))
-          .child(h_flex().gap(10).items_center().child(div().text_size(11).text_color(t.muted).child("담당 도구"))
-            .child(this.button(t, `team-profile-agent-${profile.id}`, `${this.toolName(profile.agent)}  ▾`, (cx) => {
-              this.agentPicker = this.agentPicker === profile.id ? null : profile.id; cx.notify();
-            }, { small: true }))
-            .child(div().text_size(10.5).text_color(this.toolHint(profile.agent) === "설치 필요" ? t.blocked : t.dim).child(this.toolHint(profile.agent))))
-          .when(this.agentPicker === profile.id, (element) => element.child(this.agentChoices(profile, t)))
-          .child(this.field(t, Textarea.new(this.profileInputs[profile.id])).h(94)))))
+        .children(this.profileDraft.map((profile, index) => this.profileView(profile, index, t))))
       .child(h_flex().flex_none().px(22).py(13).gap(10).items_center().border_t(1).border_color(t.border)
         .child(this.button(t, "team-profile-defaults", "기본 역할 불러오기", (cx) => {
-          this.setProfileEditors(defaultProfiles()); this.profilesDirty = true; this.notice = null; cx.notify();
-        }))
+          const baseline = this.profileBaseline;
+          this.setProfileEditors(defaultProfiles()); this.profileBaseline = baseline; this.updateProfilesDirty(); this.notice = null; cx.notify();
+        }, { disabled: this.profilesDirty }))
         .child(div().flex_1())
         .child(div().text_size(11).text_color(t.dim).child(this.profilesDirty ? "저장하지 않은 변경사항" : "저장된 역할 설정"))
+        .when(this.profilesDirty, (element) => element.child(this.button(t, "team-profile-discard", "변경 취소", (cx) => this.discardProfiles(cx))))
         .child(this.button(t, "team-profile-save", "역할 저장", (cx) => this.saveProfiles(cx), { primary: true, disabled: !this.profilesDirty })));
   }
 
@@ -488,6 +720,8 @@ export default class Team extends View {
           .child(div().flex_1().min_w(0).text_size(12).font_medium().text_color(t.foreground).child(stage.roleName)))
         .child(h_flex().gap(7).items_center().child(div().flex_1().text_size(11).text_color(t.muted).child(this.toolName(stage.agent)))
           .child(this.badge(t, stage.status)))
+        .child(div().id(`team-stage-model-${stage.id}`).min_w(0).truncate().tooltip(stage.model || "도구 기본 모델").text_size(10.5).text_color(t.dim).child(stage.model || "도구 기본 모델"))
+        .child(div().text_size(10.5).text_color(t.dim).child(this.accessName(stage.access)))
         .when(Boolean(stage.terminal), (element) => element.child(this.button(t, `team-terminal-${stage.id}`, "터미널 열기", (cx) => {
           if (this.isCheck) return;
           try { this.runtime.openTerminal(current.id, stage.id); }
@@ -509,6 +743,7 @@ export default class Team extends View {
       .child(h_flex().gap(10).items_center()
         .child(div().flex_1().text_size(16).font_semibold().text_color(t.foreground).child(stage?.roleName ?? "팀 작업"))
         .when(Boolean(stage), (element) => element.child(this.badge(t, stage.status))))
+      .when(Boolean(stage), (element) => element.child(div().text_size(11).text_color(t.muted).child(`${this.assignee(stage)} · ${this.accessName(stage.access)}`)))
       .when(Boolean(stage?.error), (element) => element.child(div().p(12).rounded(7).bg(t.blocked + "12").text_color(t.blocked).text_size(12).child(stage.error)))
       .when(Boolean(stage?.reportError), (element) => element.child(div().p(12).rounded(7).bg(t.raised).text_color(t.blocked).text_size(12).child(stage.reportError)))
       .when(["blocked", "error"].includes(stage?.terminalState), (element) => element.child(div().text_size(12).text_color(t.blocked).child("담당 AI가 입력이나 확인을 기다리고 있습니다. 해당 터미널을 열어 확인해 주세요.")))
@@ -605,6 +840,8 @@ export default class Team extends View {
         .child(h_flex().gap(10).items_center().child(div().flex_1().min_w(0).text_size(13).font_semibold().text_color(t.foreground).child(current.title))
           .child(this.badge(t, current.status, current.status === "completed" ? "팀 단계 완료" : null)))
         .child(div().text_size(12).text_color(t.muted).child(current.goal))
+        .child(v_flex().gap(4).children(current.stages.map((stage) => div().id(`team-history-assignee-${current.id}-${stage.id}`)
+          .truncate().tooltip(`${stage.roleName}: ${this.assignee(stage)}`).text_size(10.5).text_color(t.muted).child(`${stage.roleName}: ${this.assignee(stage)}`))))
         .child(h_flex().gap(10).items_center()
           .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(current.folder))
           .child(div().text_size(10.5).text_color(t.dim).child(`${current.stages.filter((stage) => stage.status === "completed").length}/${current.stages.length} 인수인계 · ${dateLabel(current.updatedAt)}`)))

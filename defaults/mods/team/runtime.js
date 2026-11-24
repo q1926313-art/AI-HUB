@@ -9,6 +9,9 @@ const safeId = (id) => typeof id === "string" && /^[a-z0-9][a-z0-9_-]{0,95}$/.te
 const psQuote = (word) => "'" + word.replace(/['\u2018\u2019\u201a\u201b]/gu, "$&$&") + "'";
 const stateWord = (terminal) => typeof terminal?.status === "string" ? terminal.status : terminal?.status?.state;
 const textError = (error) => String(error?.message ?? error).replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").slice(0, 2000);
+const stripAnsi = (text) => String(text ?? "").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+const modelId = (value) => typeof value === "string" && value.length <= 200 && /^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$/.test(value);
+const modelTools = new Set(["claude", "codex", "opencode"]);
 // Module copies share this transient coordination lock. Persisted launch identity
 // still permits recovery after hot reload or restart without guessing a retry.
 const inFlight = new Set();
@@ -26,11 +29,101 @@ export function reportFile(run, stage) {
   return runDirectory(run) + "/" + stage.id + "-" + stage.attempt + ".json";
 }
 
+// Both the released v1 CLI and v2 print one provider/model ID per line.
+// Ignore headings/logs; a model list is not proof of account access.
+export function parseModelList(stdout) {
+  if (typeof stdout !== "string" || stdout.length > 1000000) throw new Error("모델 목록 응답이 너무 크거나 올바르지 않습니다.");
+  const ids = [...new Set(stripAnsi(stdout).split(/\r?\n/).map((line) => line.trim())
+    .filter((id) => modelId(id) && /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9]/.test(id)))];
+  if (ids.length > 4096) throw new Error("모델 목록이 너무 큽니다. OpenCode의 활성 공급자 설정을 확인하세요.");
+  if (!ids.length) throw new Error("OpenCode에서 모델 목록을 읽지 못했습니다. CLI와 공급자 설정을 확인하세요.");
+  return ids.sort((a, b) => a.localeCompare(b)).map((id) => ({ id, name: id }));
+}
+
+function withoutOption(argv, names) {
+  const result = [argv[0]];
+  for (let i = 1; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--") { result.push(...argv.slice(i)); break; }
+    if (names.includes(arg)) {
+      if (!argv[i + 1] || argv[i + 1].startsWith("-")) throw new Error("도구 실행 설정의 " + arg + " 값이 없습니다.");
+      i++; continue;
+    }
+    if (names.some((name) => arg.startsWith(name + "=") || (name.length === 2 && arg.startsWith(name) && arg.length > 2))) continue;
+    result.push(arg);
+  }
+  return result;
+}
+
+function withOptions(argv, options) {
+  const at = argv.indexOf("--");
+  return at < 0 ? [...argv, ...options] : [...argv.slice(0, at), ...options, ...argv.slice(at)];
+}
+
+function openCodeConfiguration(argv) {
+  const executable = argv?.[0];
+  const name = typeof executable === "string" ? executable.replace(/\\/g, "/").split("/").at(-1) : "";
+  if (!/^opencode(?:\.exe|\.cmd|\.ps1)?$/i.test(name) || /[\u0000\r\n]/.test(executable)) throw new Error("AI 팀의 OpenCode 실행 설정에는 opencode 또는 opencode 실행 파일 경로를 직접 지정하세요. npx 등의 래퍼 실행은 지원하지 않습니다.");
+  const valued = new Set(["--model", "-m", "--prompt", "--agent", "--variant", "--log-level", "--port", "--hostname", "--server", "--session", "-s", "--title", "--theme"]);
+  const query = [];
+  let mode = null;
+  for (let i = 1; i < argv.length; i++) {
+    const arg = argv[i];
+    if (typeof arg !== "string" || !arg || /[\u0000\r\n]/.test(arg)) throw new Error("OpenCode 실행 설정이 올바르지 않습니다.");
+    if (arg === "mini" || arg === "run") {
+      if (i !== 1) throw new Error("OpenCode 하위 명령은 실행 파일 바로 뒤에 지정하세요: opencode mini 또는 opencode run.");
+      mode = arg; continue;
+    }
+    if (arg === "--") {
+      if (i !== argv.length - 1) throw new Error("AI 팀은 선택한 프로젝트를 사용합니다. OpenCode 실행 설정의 별도 프로젝트 경로를 제거하세요.");
+      continue;
+    }
+    if (!arg.startsWith("-")) throw new Error("OpenCode 실행 설정의 위치 인자를 확인하세요. 프로젝트는 AI 팀의 폴더 선택으로 지정합니다.");
+    if (valued.has(arg)) {
+      const value = argv[++i];
+      if (typeof value !== "string" || !value || value.startsWith("-") || /[\u0000\r\n]/.test(value)) throw new Error("OpenCode 실행 설정의 " + arg + " 값이 없습니다.");
+      if (arg === "--server") query.push(arg, value);
+    } else if (arg === "--standalone" || arg.startsWith("--server=")) query.push(arg);
+  }
+  return { executable, mode, query };
+}
+
+// Windows' npm installations commonly expose a .cmd/.ps1 shim. PowerShell
+// resolves that same user command for probes and live launches, without eval
+// of model IDs or paths and without an interactive shell left behind.
+export function capturedArguments(argv, shell = "powershell.exe") {
+  if (!Array.isArray(argv) || !argv.length || argv.some((word) => typeof word !== "string" || !word || /[\u0000\r\n]/.test(word))) throw new Error("도구 조회 명령이 올바르지 않습니다.");
+  const line = "& " + argv.map(psQuote).join(" ");
+  return [shell, "-NoLogo", "-NonInteractive", "-Command", "$ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = 0; try { " + line + "; exit $LASTEXITCODE } catch { Write-Error $_; exit 1 }"];
+}
+
+export function agentArguments(stage, configured, prompt, openCodeMode = "root") {
+  if (!Array.isArray(configured) || !configured.length || configured.some((word) => typeof word !== "string" || !word || /[\u0000\r\n]/.test(word))) throw new Error("AI 실행 설정이 올바르지 않습니다.");
+  if (typeof prompt !== "string" || !prompt || /[\u0000\r\n]/.test(prompt)) throw new Error("AI 시작 지시문이 올바르지 않습니다.");
+  const model = stage.model ?? "";
+  if (model && (!modelId(model) || !modelTools.has(stage.agent))) throw new Error("이 도구의 모델 지정은 지원하지 않거나 모델 ID가 올바르지 않습니다. 도구 기본 모델을 사용하세요.");
+  if (stage.agent === "opencode" && model && !/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9]/.test(model)) throw new Error("OpenCode 모델은 provider/model 전체 ID가 필요합니다.");
+  let argv = [...configured];
+  if (stage.agent === "opencode") {
+    const config = openCodeConfiguration(argv);
+    if (config.mode && config.mode !== openCodeMode) throw new Error("OpenCode 시작 방식이 실행 설정과 일치하지 않습니다.");
+    if (openCodeMode === "mini" && !config.mode) argv.splice(1, 0, "mini");
+  }
+  if (model) {
+    argv = withoutOption(argv, stage.agent === "claude" ? ["--model"] : ["--model", "-m"]);
+    argv = withOptions(argv, ["--model", model]);
+  }
+  if (stage.agent !== "opencode" || openCodeMode === "run") return [...argv, prompt];
+  // OpenCode's positional argument is a project directory, not a prompt.
+  argv = withoutOption(argv, ["--prompt"]);
+  return withOptions(argv, ["--prompt", prompt]);
+}
+
 // Each word is a distinct argument. The user's task is read from a file, keeping
 // Windows' command line short and avoiding shell interpolation of task text.
 export function launcherArguments(platform, argv, prompt, shell) {
   if (!Array.isArray(argv) || !argv.length || argv.length > 64 || argv.some((v) => typeof v !== "string" || !v || /[\u0000\r\n]/u.test(v))) throw new Error("AI 실행 명령이 올바르지 않습니다.");
-  const command = [...argv, prompt];
+  const command = prompt === undefined ? [...argv] : [...argv, prompt];
   if (platform === "windows") {
     const line = "& " + command.map(psQuote).join(" ");
     if (line.length > 24000) throw new Error("실행 명령이 너무 깁니다. 도구의 실행 설정을 줄여 주세요.");
@@ -115,6 +208,44 @@ export function createRuntime(host) {
     } catch {}
     return "/bin/sh";
   };
+  const listModels = async ({ agent = "opencode", folder } = {}) => {
+    if (agent !== "opencode") throw new Error("모델 목록 불러오기는 OpenCode에서 지원합니다. 다른 도구는 모델 이름을 직접 입력하세요.");
+    const program = (await host.knownAgents({ on: null })).find((entry) => entry.key === "opencode" && entry.installed);
+    if (!program?.run?.length) throw new Error("OpenCode CLI를 먼저 설치하고 공급자를 연결하세요.");
+    const config = openCodeConfiguration(program.run);
+    const cwd = folder?.trim() || undefined;
+    if (cwd) runDirectory({ id: "models", folder: cwd });
+    // --refresh and provider positional filters were removed in v2. This
+    // shared command also loads project-specific providers when cwd is given.
+    const reply = result(await captureCli(config.executable, ["models", ...config.query], { ...(cwd ? { cwd } : {}), timeout: 30000 }), "OpenCode 모델 목록");
+    return parseModelList(reply.stdout);
+  };
+  const captureCli = async (command, args, options) => {
+    if (host.window?.()?.platform !== "windows") return host.exec(command, args, options);
+    const argv = capturedArguments([command, ...args], await shellFor("windows"));
+    return host.exec(argv[0], argv.slice(1), options);
+  };
+  const openCodeMode = async (program, stage, folder) => {
+    const config = openCodeConfiguration(program.run), explicit = config.mode;
+    const needsModel = Boolean(stage.model) || program.run.some((arg) => arg === "--model" || arg.startsWith("--model=") || /^-m(?:.|$)/.test(arg));
+    const supports = (help, flag) => stripAnsi(help).split(/\r?\n/).some((line) => new RegExp("^\\s*(?:-[A-Za-z],?\\s+)?--" + flag + "(?:[=\\s<\\[]|$)").test(line));
+    const help = async (mode) => {
+      const response = await captureCli(config.executable, [...(mode ? [mode] : []), "--help"], { cwd: folder, timeout: 10000 });
+      return response?.code === 0 ? response.stdout + "\n" + (response.stderr || "") : "";
+    };
+    if (explicit === "run") {
+      const usage = await help("run");
+      if (usage.trim() && (!needsModel || supports(usage, "model"))) return "run";
+    } else {
+      const usage = await help(explicit);
+      if (supports(usage, "prompt") && (!needsModel || supports(usage, "model"))) return explicit || "root";
+      if (!explicit) {
+        const mini = await help("mini");
+        if (supports(mini, "prompt") && (!needsModel || supports(mini, "model"))) return "mini";
+      }
+    }
+    throw new Error("설치된 OpenCode의 모델·시작 지시문 옵션을 확인하지 못했습니다. CLI를 업데이트하거나 실행 설정을 확인하세요.");
+  };
   const ignoreRecords = async (run) => {
     // Local-only Git exclusion: no tracked .gitignore or project settings are edited.
     const top = await host.exec("git", ["rev-parse", "--show-toplevel"], { cwd: run.folder, timeout: 10000 }).catch(() => null);
@@ -164,6 +295,11 @@ export function createRuntime(host) {
       const installed = await host.knownAgents({ on: null });
       const agent = installed.find((item) => item.key === stage.agent && item.installed);
       if (!agent?.run?.length) throw new Error(stage.agent + "를 실행할 수 없습니다. 해당 CLI를 설치·로그인한 뒤 다시 시도하거나 역할 설정을 바꾸어 새 팀 작업을 만드세요.");
+      let mode = "root";
+      if (stage.agent === "opencode") {
+        if (stage.model && !(await listModels({ agent: "opencode", folder: run.folder })).some((entry) => entry.id === stage.model)) throw new Error("선택한 OpenCode 모델이 이 프로젝트의 모델 목록에 없습니다: " + stage.model + ". 역할 설정에서 모델 목록을 확인하세요.");
+        mode = await openCodeMode(agent, stage, run.folder);
+      }
       const reportPath = reportFile(run, stage);
       const briefPath = reportPath.replace(/\.json$/, ".md");
       const brief = buildPrompt(run, stage, reportPath);
@@ -173,7 +309,8 @@ export function createRuntime(host) {
       const platform = host.window?.()?.platform || "linux";
       const shell = await shellFor(platform);
       const shortTask = "AI Hub 팀 작업입니다. 프로젝트 지침을 먼저 확인한 뒤 UTF-8 작업 지시서 " + JSON.stringify(briefPath) + "를 읽고 해당 역할만 수행하세요. 마지막에 지시서의 JSON 형식으로 인수인계 보고서를 " + JSON.stringify(reportPath) + "에 작성하세요. 기존 도구의 권한 정책을 유지하세요.";
-      const argv = launcherArguments(platform, agent.run, shortTask, shell);
+      const command = agentArguments(stage, agent.run, shortTask, mode);
+      const argv = launcherArguments(platform, command, undefined, shell);
       const tab = "aihub-" + run.id + "-" + stage.id + "-" + attempt;
       const space = run.spaceId || "aihub-" + run.id;
       const args = ["run", "--bg", "--json", "--keep", "--no-parent", "--no-notify", "--cwd", run.folder,
@@ -298,6 +435,7 @@ export function createRuntime(host) {
 
   return {
     getState,
+    listModels,
     saveProfiles(profiles) {
       const validated = validateProfiles(profiles), state = getState();
       store({ ...state, profiles: validated });
@@ -350,7 +488,7 @@ export function createRuntime(host) {
     exportRun(id) {
       return exclusively(id, async () => {
         const run = find(id), dir = runDirectory(run);
-        const markdown = ["# " + run.title, "", "## 작업 목표", run.goal, "", "프로젝트: " + run.folder, "", "이 문서의 검사 결과는 각 AI가 보고한 내용입니다.", "", ...run.stages.flatMap((stage) => ["## " + stage.roleName + " · " + stage.agent, "상태: " + stage.status, "", stage.report ? reportMarkdown(stage.report) : "인수인계 보고서 없음", ""])].join("\n");
+        const markdown = ["# " + run.title, "", "## 작업 목표", run.goal, "", "프로젝트: " + run.folder, "", "이 문서의 검사 결과는 각 AI가 보고한 내용입니다.", "", ...run.stages.flatMap((stage) => ["## " + stage.roleName + " · " + stage.agent, "지정 모델: " + (stage.model || "도구 기본 모델") + " (실제 응답 모델의 확인 기록은 아님)", "작업 방식 지침: " + (stage.access === "write" ? "구현·수정" : "자문·검토"), "상태: " + stage.status, "", stage.report ? reportMarkdown(stage.report) : "인수인계 보고서 없음", ""])].join("\n");
         const file = dir + "/handoff.md", old = await host.readTextFile(file);
         await host.writeTextFile(file, markdown, old);
         return file;
