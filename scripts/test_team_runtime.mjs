@@ -5,11 +5,16 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createRuntime, reportFile, launcherArguments, agentArguments, parseModelList, capturedArguments } from "../defaults/mods/team/runtime.js";
+import { createRuntime, reportFile, launcherArguments, agentArguments, parseModelList, parseCodexModelCache, parseOpenCodeModelMetadata, capturedArguments } from "../defaults/mods/team/runtime.js";
 import { STATE_KEY, LIMITS, defaultProfiles } from "../defaults/mods/team/model.js";
 
 const clone = (value) => value == null ? value : JSON.parse(JSON.stringify(value));
 const okay = (value) => ({ code: 0, stdout: typeof value === "string" ? value : JSON.stringify(value), stderr: "" });
+// Actual hc CLI contract: run/ls use cli/output.rs::short (no labels), while
+// get returns the full record. Keeping these different prevents API-shaped
+// mocks from hiding a launch/recovery ownership regression.
+const compactTerminal = (terminal) => ({ address: terminal.address, state: terminal.state, status: terminal.status?.state, turn: terminal.turn,
+  ...(terminal.reason ? { reason: terminal.reason } : {}), ...(terminal.exit_code == null ? {} : { exit_code: terminal.exit_code }) });
 let harnessSequence = 0;
 
 function harness() {
@@ -21,6 +26,9 @@ function harness() {
     models: "opencode-go/deepseek-v4.1-flash\nopencode/deepseek-v4.1-flash\n",
     rootHelp: "  -m, --model  provider/model\n      --prompt  initial prompt\n",
     miniHelp: "  --model <string>\n  --prompt <string>\n",
+    modelsHelp: "", apiHelp: "", runHelp: null, metadata: null, verboseModels: "", codexHome: "",
+    claudeHelp: "  --model <model>\n  --effort <level>\n",
+    codexHelp: "  -m, --model <MODEL>\n  -c, --config <key=value>\n",
   };
   const host = {
     shared(key) { return clone(data.get(key)); },
@@ -29,6 +37,7 @@ function harness() {
     makeId: () => "team-test-" + (++idSequence),
     window: () => ({ platform: "linux" }),
     appHome: () => home,
+    home: () => "/home/test",
     async knownAgents() { return controls.installed.map((key) => ({ key, installed: true, run: controls.configured[key] ?? (key === "codex" ? ["codex", "--no-daemon"] : [key]) })); },
     async readTextFile(file) { effects.push(["read", file]); return files.get(file) ?? null; },
     async writeTextFile(file, text, expected) {
@@ -40,15 +49,28 @@ function harness() {
       if (controls.exec) return controls.exec(command, args, options);
       if (command === "git") return { code: 128, stdout: "", stderr: "not a repository" };
       if (command === "opencode") {
+        if (args.includes("--help")) return okay(args[0] === "--help" ? controls.rootHelp : args[0] === "models" ? controls.modelsHelp : args[0] === "api" ? controls.apiHelp : args[0] === "run" ? (controls.runHelp ?? controls.miniHelp) : controls.miniHelp);
+        if (args[0] === "models" && args.includes("--verbose")) return okay(controls.verboseModels);
         if (args[0] === "models") return okay(controls.models);
-        if (args.includes("--help")) return okay(args[0] === "--help" ? controls.rootHelp : controls.miniHelp);
+        if (args[0] === "api" && args[1] === "model.list") return okay(controls.metadata);
       }
+      if (command === "claude" && args.includes("--help")) return okay(controls.claudeHelp);
+      if (command === "codex" && args.includes("--help")) return okay(controls.codexHelp);
+      if (command === "sh" && args.at(-1).includes("CODEX_HOME")) return okay(controls.codexHome);
       if (["powershell.exe", "pwsh.exe"].includes(command)) {
         const script = args.at(-1);
         if (script.includes("$PSVersionTable")) return okay("7.5");
+        if (script.includes("$env:CODEX_HOME")) return okay(controls.codexHome);
+        if (script.includes("'opencode' 'models' '--help'")) return okay(controls.modelsHelp);
+        if (script.includes("'opencode' 'api' '--help'")) return okay(controls.apiHelp);
+        if (script.includes("'opencode' 'models' '--verbose'")) return okay(controls.verboseModels);
+        if (script.includes("'opencode' 'api' 'model.list'")) return okay(controls.metadata);
         if (script.includes("'opencode' 'models'")) return okay(controls.models);
         if (script.includes("'opencode' '--help'")) return okay(controls.rootHelp);
         if (script.includes("'opencode' 'mini' '--help'")) return okay(controls.miniHelp);
+        if (script.includes("'opencode' 'run' '--help'")) return okay(controls.runHelp ?? controls.miniHelp);
+        if (script.includes("'claude' '--help'")) return okay(controls.claudeHelp);
+        if (script.includes("'codex' '--help'")) return okay(controls.codexHelp);
       }
       return okay("/bin/bash");
     },
@@ -63,14 +85,14 @@ function harness() {
         const terminal = { address: "t" + (++sequence), labels, state: "live", status: { state: "idle" }, turn: 0, reason: null, exit_code: null, argv: args.slice(args.indexOf("--") + 1) };
         if (controls.run) return controls.run(terminal, terminals);
         terminals.set(terminal.address, terminal);
-        return okay(terminal);
+        return okay(compactTerminal(terminal));
       }
       if (args[0] === "ls") {
         if (controls.ls) return controls.ls();
         const filters = args.flatMap((arg, i) => arg === "--label" ? [args[i + 1]] : []);
         return okay({ terminals: [...terminals.values()].filter((terminal) => filters.every((filter) => {
           const at = filter.indexOf("="); return terminal.labels[filter.slice(0, at)] === filter.slice(at + 1);
-        })) });
+        })).map(compactTerminal) });
       }
       if (args[0] === "get") {
         if (controls.get) return controls.get(args[1]);
@@ -141,6 +163,58 @@ test("late launch replies reconnect by exact labels instead of duplicating a CLI
   assert.equal(h.stage(run.id).status, "running");
   assert.equal(h.stage(run.id).terminal, "t1");
   assert.equal(h.terminals.size, 1);
+});
+
+test("a compact hc run reply is resolved with get before accepting its ownership", async () => {
+  const h = harness(), run = h.create();
+  await h.runtime.launch(run.id);
+  assert.equal(h.stage(run.id).terminal, "t1");
+  assert.equal(h.stage(run.id).launchUncertain, false);
+  assert.equal(h.stage(run.id).error, null);
+  assert.deepEqual(h.effects.filter((effect) => effect[0] === "hc").map((effect) => effect[1][0]), ["run", "get"]);
+});
+
+test("an installed 0.1.19 uncertain launch reconnects and collects its report without restarting AI", async () => {
+  const h = harness(), run = h.create({ autoAdvance: true });
+  const state = h.host.shared(STATE_KEY), saved = state.runs[0], stage = saved.stages[0];
+  Object.assign(saved, { status: "paused", autoAdvance: false });
+  Object.assign(stage, { status: "launching", attempt: 1, launchKey: run.id + "-plan-1", startedAt: 10000,
+    launchUncertain: true, error: "실행 결과의 작업 정보가 일치하지 않습니다." });
+  h.data.set(STATE_KEY, state);
+  h.terminals.set("t37", { address: "t37", labels: { "aihub.run": run.id, "aihub.stage": "plan", "aihub.attempt": "1" },
+    state: "live", status: { state: "idle" }, turn: 1, exit_code: null, reason: null });
+  h.ready(run.id);
+  const reopened = createRuntime(h.host);
+  await reopened.refresh(run.id, { autoAdvance: true });
+  assert.equal(h.stage(run.id).status, "ready");
+  assert.equal(h.stage(run.id).terminal, "t37");
+  assert.equal(h.stage(run.id).attempt, 1);
+  assert.equal(h.stage(run.id).launchUncertain, false);
+  assert.equal(h.stage(run.id).error, null, "the stale mismatch is cleared once full ownership is verified");
+  assert.ok(h.stage(run.id).report);
+  assert.equal(h.current(run.id).autoAdvance, false);
+  assert.deepEqual(h.effects.filter((effect) => effect[0] === "hc").map((effect) => effect[1][0]), ["ls", "get"]);
+  assert.equal(h.effects.some((effect) => ["exec", "write"].includes(effect[0])), false);
+});
+
+test("compact candidates never bypass mismatched ownership, duplicate attempts, or malformed responses", async () => {
+  for (const mode of ["wrong-label", "wrong-address", "duplicate", "malformed-list"]) {
+    const h = harness(), run = h.create();
+    h.controls.run = (terminal, list) => {
+      list.set(terminal.address, terminal);
+      if (mode === "duplicate") list.set("t2", { ...clone(terminal), address: "t2" });
+      throw new Error("late run response");
+    };
+    if (mode === "wrong-label") h.controls.get = (id) => okay({ ...h.terminals.get(id), labels: { "aihub.run": "another-run" } });
+    if (mode === "wrong-address") h.controls.get = (id) => okay({ ...h.terminals.get(id), address: "t999" });
+    if (mode === "malformed-list") h.controls.ls = () => okay({ unrelated: [] });
+    await assert.rejects(h.runtime.launch(run.id), /late run response/, mode);
+    await h.runtime.refresh(run.id);
+    await assert.rejects(h.runtime.launch(run.id), undefined, mode);
+    assert.equal(h.stage(run.id).terminal, null, mode);
+    assert.equal(h.stage(run.id).launchUncertain, true, mode);
+    assert.equal(h.effects.filter((effect) => effect[0] === "hc" && effect[1][0] === "run").length, 1, mode);
+  }
 });
 
 test("ambiguous start remains recoverable and never permits an immediate retry", async () => {
@@ -442,6 +516,164 @@ test("pausing during the next role's setup cancels preparation before its CLI st
 });
 
 const openCodeRun = (h) => h.create({ profiles: defaultProfiles().map((p) => ({ ...p, enabled: p.id === "implement" })) });
+const oneRole = (h, agent, model, effort) => h.create({ profiles: [{ id: "work", name: "담당", agent, model, effort, access: "write", enabled: true, instructions: "승인된 한 가지 일을 수행하고 보고하세요." }] });
+const modelCache = (id = "gpt-6.2-sol", efforts = ["low", "medium", "high", "xhigh", "max", "ultra"]) => JSON.stringify({
+  fetched_at: "2026-11-24T12:00:00Z", client_version: "0.test", models: [{ slug: id, display_name: "로컬 모델", visibility: "list",
+    supported_reasoning_levels: efforts.map((effort) => ({ effort, description: effort })) }],
+});
+const goModel = "opencode-go/deepseek-v4.1-flash";
+function apiCatalog(h, efforts = ["low", "high"]) {
+  h.controls.apiHelp = "  --param <key=value>  OpenAPI query parameter\n";
+  h.controls.metadata = { location: { directory: "/work/project" }, data: [{ providerID: "opencode-go", id: "deepseek-v4.1-flash", enabled: true,
+    name: "DeepSeek fixture", variants: efforts.map((id) => ({ id })) }] };
+}
+
+test("model presets and Codex local catalogs remain distinct and discovery does not start work", async () => {
+  const h = harness();
+  assert.ok((await h.runtime.listModels({ agent: "claude" })).some((model) => model.id === "claude-fable-5-2"));
+  assert.equal(h.effects.length, 0, "Claude presets do not probe accounts or programs");
+  h.controls.codexHome = "C:\\Users\\테스트 사용자\\Codex";
+  h.files.set(h.controls.codexHome + "/models_cache.json", modelCache("local-custom", ["high", "ultra"]));
+  const models = await h.runtime.listModels({ agent: "codex" });
+  assert.deepEqual(models.find((model) => model.id === "local-custom").efforts, ["high", "ultra"]);
+  assert.equal(models.find((model) => model.id === "local-custom").source, "codex-cache");
+  assert.ok(models.some((model) => model.id === "gpt-6.2-sol" && model.source.startsWith("https://")));
+  assert.equal(h.effects.some((effect) => ["hc", "write"].includes(effect[0]) || (effect[0] === "exec" && effect[1] === "codex")), false);
+  assert.throws(() => parseCodexModelCache("{"), /캐시/);
+  const invalid = parseCodexModelCache(JSON.stringify({ models: [
+    { slug: "hidden", visibility: "hide", supported_reasoning_levels: [{ effort: "high" }] },
+    { slug: "invalid-level", supported_reasoning_levels: [{ effort: "high; ignored" }] },
+    { slug: "no-level", supported_reasoning_levels: [] },
+  ] }));
+  assert.equal(invalid.some((model) => model.id === "hidden"), false);
+  assert.equal(invalid.find((model) => model.id === "invalid-level").efforts, undefined);
+  assert.deepEqual(invalid.find((model) => model.id === "no-level").efforts, []);
+});
+
+test("effort overrides replace only their own flags and preserve permission settings", () => {
+  const claude = agentArguments({ agent: "claude", model: "claude-fable-5-2", effort: "xhigh" },
+    ["claude", "--effort=low", "--permission-mode", "default"], "task");
+  assert.deepEqual(claude, ["claude", "--permission-mode", "default", "--model", "claude-fable-5-2", "--effort", "xhigh", "task"]);
+  const codex = agentArguments({ agent: "codex", model: "local-custom", effort: "ultra" },
+    ["codex", "--no-daemon", "-c", 'approval_policy="on-request"', "--config=model_reasoning_effort=low", "-cmodel_reasoning_effort=medium", "--config", "model_reasoning_effort = high", "--"],
+    "task", "root", { id: "local-custom", efforts: ["high", "ultra"] });
+  assert.deepEqual(codex, ["codex", "--no-daemon", "-c", 'approval_policy="on-request"', "--model", "local-custom", "-c", "model_reasoning_effort=ultra", "--", "task"]);
+  assert.throws(() => agentArguments({ agent: "claude", model: "claude-opus-4-6", effort: "xhigh" }, ["claude"], "task"), /지원하지/);
+  assert.throws(() => agentArguments({ agent: "codex", model: "local-custom", effort: "high" }, ["codex"], "task"), /지원 정보를 확인하지/);
+});
+
+test("Codex launches a cached supported effort, exports it, and refuses unadvertised levels", async () => {
+  const h = harness();
+  h.files.set("/home/test/.codex/models_cache.json", modelCache("local-custom", ["high", "ultra"]));
+  const run = oneRole(h, "codex", "local-custom", "ultra");
+  await h.runtime.launch(run.id);
+  assert.ok(h.terminals.get("t1").argv.includes("model_reasoning_effort=ultra"));
+  assert.equal(h.stage(run.id).effort, "ultra");
+  assert.match(h.files.get(await h.runtime.exportRun(run.id)), /지정 추론 강도: ultra/);
+  const rejected = oneRole(h, "codex", "local-custom", "max");
+  await assert.rejects(h.runtime.launch(rejected.id), /지원하지/);
+  assert.equal(h.terminals.size, 1);
+  assert.equal(h.stage(rejected.id).effort, "max");
+});
+
+test("Claude selected effort reaches both CLI and child environment, and unsupported help fails closed", async () => {
+  for (const platform of ["linux", "windows"]) {
+    const h = harness(); h.host.window = () => ({ platform });
+    const run = oneRole(h, "claude", "claude-fable-5-2", "xhigh");
+    await h.runtime.launch(run.id);
+    const argv = h.terminals.get("t1").argv;
+    if (platform === "windows") {
+      assert.match(argv.at(-1), /\$env:CLAUDE_CODE_EFFORT_LEVEL = 'xhigh'/);
+      assert.match(argv.at(-1), /'--effort' 'xhigh'/);
+      assert.match(argv.at(-1), /finally \{ \$env:CLAUDE_CODE_EFFORT_LEVEL = \$ai_hub_env_0/);
+    } else {
+      assert.ok(argv.includes("CLAUDE_CODE_EFFORT_LEVEL=xhigh"));
+      assert.equal(argv[argv.indexOf("--effort") + 1], "xhigh");
+    }
+  }
+  const h = harness(), run = oneRole(h, "claude", "claude-fable-5-2", "high");
+  h.controls.claudeHelp = "  --model <model>\n";
+  await assert.rejects(h.runtime.launch(run.id), /옵션을 확인하지 못/);
+  assert.equal(h.terminals.size, 0);
+  assert.equal(h.stage(run.id).effort, "high");
+});
+
+test("OpenCode project API metadata supplies exact variants without substituting provider IDs", async () => {
+  const h = harness(); apiCatalog(h);
+  h.controls.configured.opencode = ["opencode", "--server", "http://localhost:4096"];
+  const models = await h.runtime.listModels({ folder: "/work/project" });
+  assert.deepEqual(models.find((model) => model.id === goModel).efforts, ["low", "high"]);
+  assert.equal(models.find((model) => model.id === "opencode/deepseek-v4.1-flash").efforts, undefined);
+  const query = h.effects.find((effect) => effect[0] === "exec" && effect[2]?.[0] === "api" && effect[2]?.[1] === "model.list");
+  assert.deepEqual(query[2], ["api", "model.list", "--param", "location[directory]=/work/project", "--server", "http://localhost:4096"]);
+  assert.equal(query[3].cwd, "/work/project");
+  assert.equal(h.effects.some((effect) => ["hc", "write"].includes(effect[0])), false);
+});
+
+test("OpenCode v2 uses a validated model#variant in mini and leaves no conflicting variant flag", async () => {
+  for (const platform of ["linux", "windows"]) {
+    const h = harness(); apiCatalog(h); h.host.window = () => ({ platform });
+    h.controls.rootHelp = "  --prompt <text>\n";
+    h.controls.configured.opencode = ["opencode", "--variant", "old", "--agent", "build"];
+    const run = oneRole(h, "opencode", goModel, "high");
+    await h.runtime.launch(run.id);
+    const argv = h.terminals.get("t1").argv;
+    if (platform === "windows") {
+      assert.match(argv.at(-1), /'opencode' 'mini'/);
+      assert.match(argv.at(-1), /'--model' 'opencode-go\/deepseek-v4\.1-flash#high'/);
+      assert.doesNotMatch(argv.at(-1), /'--variant'/);
+    } else {
+      assert.equal(argv[argv.indexOf("opencode") + 1], "mini");
+      assert.equal(argv[argv.indexOf("--model") + 1], goModel + "#high");
+      assert.equal(argv.includes("--variant"), false);
+    }
+    assert.equal(h.stage(run.id).model, goModel, "the stored model and effort stay separate");
+    assert.equal(h.stage(run.id).effort, "high");
+  }
+});
+
+test("OpenCode v1 uses --variant only when its configured mode advertises it", async () => {
+  const verbose = goModel + "\n" + JSON.stringify({ name: "DeepSeek fixture", variants: { low: {}, high: {}, disabled: { disabled: true } } }, null, 2) + "\n";
+  const capability = parseOpenCodeModelMetadata(verbose, "verbose")[0];
+  assert.deepEqual(capability.efforts, ["low", "high"]);
+  for (const explicitRun of [true, false]) {
+    const h = harness(); h.controls.modelsHelp = "  --verbose  include metadata\n"; h.controls.verboseModels = verbose;
+    h.controls.miniHelp = "unknown command mini";
+    const run = oneRole(h, "opencode", goModel, "high");
+    if (explicitRun) {
+      h.controls.configured.opencode = ["opencode", "run"];
+      h.controls.runHelp = "  --model <model>\n  --variant <variant>\n";
+      await h.runtime.launch(run.id);
+      const argv = h.terminals.get("t1").argv;
+      assert.equal(argv[argv.indexOf("--variant") + 1], "high");
+      assert.equal(argv[argv.indexOf("--model") + 1], goModel);
+    } else {
+      await assert.rejects(h.runtime.launch(run.id), /추론 강도 옵션/);
+      assert.equal(h.terminals.size, 0, "an interactive root is never silently replaced by noninteractive run");
+    }
+  }
+});
+
+test("missing, malformed, or wrong-project variants never silently lower a requested effort", async () => {
+  for (const scenario of ["missing", "wrong-project", "malformed", "unsupported"]) {
+    const h = harness();
+    if (scenario !== "missing") apiCatalog(h, scenario === "unsupported" ? ["low"] : ["high"]);
+    if (scenario === "wrong-project") h.controls.metadata.location.directory = "/different/project";
+    if (scenario === "malformed") h.controls.metadata.data[0].variants = [{ id: "high; ignored" }];
+    const run = oneRole(h, "opencode", goModel, "high");
+    await assert.rejects(h.runtime.launch(run.id), /지원 정보|지원하지/, scenario);
+    assert.equal(h.terminals.size, 0, scenario);
+    assert.equal(h.stage(run.id).effort, "high", scenario);
+    assert.equal(h.stage(run.id).model, goModel, scenario);
+  }
+});
+
+test("Unix launch environment overrides an inherited effort only for the selected CLI", { skip: process.platform === "win32" }, () => {
+  const selected = launcherArguments("linux", [process.execPath, "-e", "console.log(process.env.CLAUDE_CODE_EFFORT_LEVEL)"], undefined, "/bin/sh", { CLAUDE_CODE_EFFORT_LEVEL: "xhigh" });
+  const output = spawnSync(selected[0], selected.slice(1), { encoding: "utf8", input: 'printf "%s\\n" "$CLAUDE_CODE_EFFORT_LEVEL"\nexit\n', env: { ...process.env, CLAUDE_CODE_EFFORT_LEVEL: "low" }, timeout: 15000 });
+  assert.equal(output.status, 0, output.stderr || String(output.error));
+  assert.deepEqual(output.stdout.trim().split(/\r?\n/), ["xhigh", "low"], "the shell after the CLI retains its original environment");
+});
 
 test("OpenCode model lists use exact provider IDs and ignore logs or malformed entries", () => {
   const models = parseModelList("\u001b[32mModels cache refreshed\u001b[0m\r\nopencode-go/deepseek-v4.1-flash\nopencode/deepseek-v4.1-flash\nopencode-go/deepseek-v4.1-flash\nhttps://not-a-model\n--model p/x\n");
@@ -458,7 +690,7 @@ test("model discovery uses the selected local project without model calls or ver
   assert.deepEqual(query[2], ["models"]);
   assert.equal(query[3].cwd, "C:\\AI\\한글 프로젝트");
   assert.equal(h.effects.some((e) => e[0] === "hc" || e[0] === "write"), false);
-  await assert.rejects(h.runtime.listModels({ agent: "codex" }), /직접 입력/);
+  assert.ok((await h.runtime.listModels({ agent: "codex" })).some((entry) => entry.id === "gpt-6.2-sol"), "Codex offers documented presets when its local cache is absent");
   h.controls.installed = ["claude", "codex"];
   await assert.rejects(h.runtime.listModels(), /설치/);
 });
@@ -611,14 +843,16 @@ test("Windows OpenCode discovery uses a bounded one-shot PowerShell probe and pr
   assert.match(script, /'--prompt' 'AI Hub/);
 });
 
-test("real Windows PowerShell probes resolve npm-style command shims and retain exit codes", { skip: process.platform !== "win32" }, () => {
+test("real Windows PowerShell shims preserve model/effort argv, exit codes, and scoped environment", { skip: process.platform !== "win32" }, () => {
   const directory = mkdtempSync(join(tmpdir(), "aihub-shim-"));
   try {
     writeFileSync(join(directory, "capture.cjs"), 'if (process.argv.includes("--fail")) process.exit(7); console.log(JSON.stringify(process.argv.slice(2)));\n');
     const shim = join(directory, "opencode.cmd");
     writeFileSync(shim, '@echo off\r\n"' + process.execPath + '" "%~dp0capture.cjs" %*\r\n');
+    const captureEnvironment = join(directory, "capture-env.cjs");
+    writeFileSync(captureEnvironment, 'console.log(JSON.stringify({args: process.argv.slice(2), effort: process.env.CLAUDE_CODE_EFFORT_LEVEL}));\n');
     for (const shell of ["powershell.exe", "pwsh.exe"]) {
-      const expected = ["models", "literal $() & text"];
+      const expected = ["models", "literal $() & text", "--model", goModel + "#high", "-c", "model_reasoning_effort=ultra"];
       const args = capturedArguments([shim, ...expected], shell);
       const output = spawnSync(args[0], args.slice(1), { encoding: "utf8", timeout: 15000 });
       assert.equal(output.status, 0, output.stderr || String(output.error));
@@ -626,6 +860,13 @@ test("real Windows PowerShell probes resolve npm-style command shims and retain 
       const fail = capturedArguments([shim, "--fail"], shell);
       const stopped = spawnSync(fail[0], fail.slice(1), { encoding: "utf8", timeout: 15000 });
       assert.equal(stopped.status, 7, stopped.stderr || String(stopped.error));
+      const launcher = launcherArguments("windows", [process.execPath, captureEnvironment, "--effort", "xhigh"], undefined, shell, { CLAUDE_CODE_EFFORT_LEVEL: "xhigh" });
+      const script = launcher.at(-1) + "; [Console]::WriteLine('RESTORED:' + $env:CLAUDE_CODE_EFFORT_LEVEL)";
+      const launched = spawnSync(shell, ["-NoLogo", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: 15000, env: { ...process.env, CLAUDE_CODE_EFFORT_LEVEL: "low" } });
+      assert.equal(launched.status, 0, launched.stderr || String(launched.error));
+      const lines = launched.stdout.trim().split(/\r?\n/);
+      assert.deepEqual(JSON.parse(lines[0]), { args: ["--effort", "xhigh"], effort: "xhigh" });
+      assert.equal(lines[1], "RESTORED:low");
     }
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });

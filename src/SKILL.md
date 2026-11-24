@@ -144,7 +144,7 @@ Open AI Hub's **AI 팀** from the sidebar or command palette, or with
 `herdr-app do mod.open --name team`. The person sets a local project, goal, and
 role profiles. Defaults are Claude Code for planning/verification, OpenCode Go
 DeepSeek V4.1 Flash (`opencode-go/deepseek-v4.1-flash`) for implementation, and
-Codex for review. Names, order, tools, models, access instructions and role
+Codex for review. Names, order, tools, models, reasoning effort, access instructions and role
 instructions are editable; the person can add/remove 1–8 roles. Roles run sequentially, with
 structured reports passed to the next role. Each CLI needs installation/login.
 Read-only role instructions are prompts, not filesystem enforcement.
@@ -156,6 +156,21 @@ configured `run` is retained. Do not silently substitute a different provider or
 model. A catalog entry is not proof of account access, and a provider alias does
 not promise a permanently pinned model version. Profile changes affect new runs;
 existing assignments stay as recorded.
+
+Claude and Codex also have selectable model presets; supported reasoning levels
+come from documented exact models or the installed tool's model catalog. Blank
+effort means the tool's default. Unsupported explicit choices must fail clearly,
+not run with a substituted model or effort. UI labels describe requested settings;
+the actual resolved provider model is visible in the CLI where it reports one.
+
+Use **실시간 작업 화면** to watch the actual team terminals: Claude large on the
+left, Codex upper right, OpenCode lower right. Set the left width to 55/65/75% and
+choose each pane's tool or specific role. A tool follows its latest started role;
+future roles show waiting cards until their turn. The view creates no extra AI
+sessions and leaves execution with the Team controller behind it. Return through
+**팀 관리 · 보고서** for handoff and stop controls. If a terminal exits, the native
+viewer closes; reopen it from Team to see the remaining roles. Closing Team still
+pauses its automatic handoff. Workspace preferences never arm execution.
 
 The panel supports manual handoff (default), optional automatic progression,
 report review/editing, terminal inspection, and Markdown export. Reported test
@@ -169,6 +184,8 @@ Reports are in `<project>/.ai-hub/team/<runId>/`; profile/recent-run state uses
 shared mod key `ai-hub.team.v1`. The installed `AGENTS.md` describes the contract.
 Do not manufacture completion reports, change run/stage/attempt identifiers, or
 silently restart an uncertain launch. Open the role's terminal to investigate.
+Core CLI run/list responses omit ownership labels: inspect each candidate with
+`hc get <address> --json` before attaching or recovering an uncertain launch.
 
 ## Customize layouts, keys, or mods
 

@@ -1,12 +1,14 @@
-// AI Hub (2026-11-24): configurable native team roles, model choices, and reviewed handoffs.
+// AI Hub (2026-11-24): configurable team models/reasoning and live work views with reviewed handoffs.
 import { View, div, svg } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import {
-  theme, spaces, panes, props, checking, closeOverlay, nextCommand, pickFolder,
-  shared, setShared, hc, exec, run, knownAgents, readTextFile, writeTextFile, appHome, window,
+  theme, spaces, panes, terminals, props, checking, openOverlay, closeOverlay, nextCommand, pickFolder,
+  shared, setShared, hc, exec, run, knownAgents, readTextFile, writeTextFile, appHome, home, window,
 } from "herdr";
 import { defaultProfiles, readState, activeStage, nextStage } from "./model.js";
 import { createRuntime } from "./runtime.js";
+import { modelOptions, effortOptions, effortProblem } from "./options.js";
+import { createWorkspace } from "./workspace.js";
 
 const TOOL_NAMES = { claude: "Claude Code", codex: "Codex", opencode: "OpenCode" };
 const MODEL_TOOLS = new Set(["claude", "codex", "opencode"]);
@@ -41,8 +43,11 @@ export default class Team extends View {
   init(_props, cx) {
     this.isCheck = checking();
     this.runtime = this.isCheck ? null : createRuntime({
-      shared, setShared, hc, exec, run, knownAgents, readTextFile, writeTextFile, appHome, window,
+      shared, setShared, hc, exec, run, knownAgents, readTextFile, writeTextFile, appHome, home, window,
     });
+    this.workspace = this.isCheck ? null : createWorkspace({ openOverlay, closeOverlay, terminals, shared, setShared, run });
+    this.workspaceError = null;
+    this.autoOpenWorkspace = true;
     this.state = this.runtime ? this.runtime.getState() : readState(null);
     this.screen = this.currentRun() ? "run" : "new";
     this.selectedStageId = null;
@@ -113,7 +118,7 @@ export default class Team extends View {
       for (const input of Object.values(inputs ?? {})) input.release();
     }
     this.profileDraft = copy(profiles ?? defaultProfiles()).map((profile) => ({
-      ...profile, model: profile.model ?? "", access: profile.access ?? (profile.id === "implement" ? "write" : "read"),
+      ...profile, model: profile.model ?? "", effort: profile.effort ?? "", access: profile.access ?? (profile.id === "implement" ? "write" : "read"),
     }));
     this.profileInputs = {};
     this.profileNames = {};
@@ -143,6 +148,7 @@ export default class Team extends View {
       ...profile,
       name: this.profileNames[profile.id]?.value() ?? profile.name,
       model: this.profileModels[profile.id]?.value() ?? profile.model ?? "",
+      effort: profile.effort ?? "",
       instructions: this.profileInputs[profile.id]?.value() ?? profile.instructions,
     }));
   }
@@ -163,7 +169,7 @@ export default class Team extends View {
     let index = 1;
     while (this.profileDraft.some((profile) => profile.id === `role-${index}`)) index++;
     const profile = {
-      id: `role-${index}`, name: "새 역할", agent: "codex", model: "", access: "read", enabled: true,
+      id: `role-${index}`, name: "새 역할", agent: "codex", model: "", effort: "", access: "read", enabled: true,
       instructions: "프로젝트 지침과 작업 목표를 확인하고 맡은 역할을 수행하세요. 결과, 확인한 근거와 남은 문제를 인수인계 보고서에 정리하세요.",
     };
     this.profileDraft.push(profile);
@@ -212,7 +218,7 @@ export default class Team extends View {
       profile.model = "";
       this.profileModels[id].set_value("");
       this.modelSearchInputs[id].set_value("");
-      this.notice = MODEL_TOOLS.has(agent) ? "담당 도구를 바꿨습니다. 사용할 모델을 다시 선택하거나 기본 모델을 사용하세요." : "담당 도구를 바꿨습니다. 이 도구는 기본 모델로 실행됩니다.";
+      this.notice = MODEL_TOOLS.has(agent) ? "담당 도구를 바꿨습니다. 모델과 추론 강도를 확인해 주세요." : "담당 도구를 바꿨습니다. 이 도구는 기본 모델로 실행됩니다. 이전 추론 강도도 확인해 주세요.";
     }
     this.agentPicker = null;
     this.modelPicker = null;
@@ -221,11 +227,12 @@ export default class Team extends View {
   }
 
   loadModels(profile, cx) {
-    if (this.isCheck || this.closed || this.busy || profile.agent !== "opencode") return;
+    if (this.isCheck || this.closed || this.busy || !MODEL_TOOLS.has(profile.agent)) return;
     const agent = profile.agent;
-    if (this.modelCatalogs[agent]?.loading) return;
-    const previous = this.modelCatalogs[agent];
-    const folder = this.folderInput.value().trim() || this.currentRun()?.folder || undefined;
+    const folder = this.modelFolder();
+    const cached = this.modelCatalogs[agent];
+    const previous = agent === "opencode" && cached?.folder !== folder ? null : cached;
+    if (previous?.loading) return;
     const request = { models: previous?.models ?? [], loaded: Boolean(previous?.loaded), loading: true, error: null, folder };
     this.modelCatalogs[agent] = request;
     this.modelPicker = profile.id;
@@ -243,12 +250,52 @@ export default class Team extends View {
     });
   }
 
-  selectModel(profileId, modelId, cx) {
-    if (this.busy || this.profileDraft.find((profile) => profile.id === profileId)?.agent !== "opencode" || !this.profileModels[profileId]) return;
+  selectModel(profileId, modelId, cx, sourceAgent = null) {
+    const profile = this.profileDraft.find((entry) => entry.id === profileId);
+    if (this.busy || !profile || !MODEL_TOOLS.has(profile.agent) || (sourceAgent && profile.agent !== sourceAgent) || !this.profileModels[profileId]) return;
     this.profileModels[profileId].set_value(modelId);
     this.updateProfilesDirty();
     this.modelPicker = null;
-    this.notice = "선택한 모델 ID를 적용하려면 역할 설정을 저장하세요.";
+    this.notice = "모델을 선택했습니다. 추론 강도를 확인하고 역할 설정을 저장하세요.";
+    cx.notify();
+  }
+
+  modelCatalog(profile) {
+    const catalog = this.modelCatalogs[profile.agent];
+    // OpenCode providers and variants can change with the project's config.
+    // Keep the person's input, but never validate it using another folder's catalog.
+    if (catalog && (profile.agent !== "opencode" || catalog.folder === this.modelFolder())) return catalog;
+    return {
+      models: modelOptions(profile.agent).filter((model) => model.id),
+      loading: false, loaded: profile.agent !== "opencode", error: null,
+    };
+  }
+
+  modelFolder() {
+    return this.folderInput.value().trim() || this.currentRun()?.folder || undefined;
+  }
+
+  modelCapability(profile) {
+    const model = this.profileModels[profile.id]?.value().trim() ?? profile.model ?? "";
+    return this.modelCatalog(profile).models.find((entry) => entry.id === model) ?? null;
+  }
+
+  profileEffortProblem(profile) {
+    const model = this.profileModels[profile.id]?.value().trim() ?? profile.model ?? "";
+    return effortProblem(profile.agent, model, profile.effort ?? "", this.modelCapability(profile));
+  }
+
+  selectEffort(profileId, effort, cx) {
+    if (this.busy) return;
+    const profile = this.profileDraft.find((entry) => entry.id === profileId);
+    if (!profile) return;
+    const model = this.profileModels[profile.id]?.value().trim() ?? profile.model ?? "";
+    const problem = effortProblem(profile.agent, model, effort, this.modelCapability(profile));
+    if (problem) { this.error = problem; cx.notify(); return; }
+    profile.effort = effort;
+    this.updateProfilesDirty();
+    this.notice = "추론 강도를 적용하려면 역할 설정을 저장하세요.";
+    this.error = null;
     cx.notify();
   }
 
@@ -287,6 +334,46 @@ export default class Team extends View {
     if (this.runtime) this.state = this.runtime.getState();
     const stage = this.selectedStage();
     if (!this.reportDirty && !this.reportEditing) this.setReportEditor(stage);
+    this.syncWorkspace();
+  }
+
+  syncWorkspace() {
+    if (this.isCheck || this.closed || !this.workspace || !this.currentRun()) return;
+    try { this.workspace.sync(this.currentRun()); }
+    catch (error) { this.workspaceError = message(error); }
+  }
+
+  openWorkspace(current, cx) {
+    if (this.isCheck || this.closed || !this.workspace || !current) return;
+    try {
+      this.workspace.open(current);
+      this.workspaceError = null;
+    } catch (error) { this.workspaceError = message(error); }
+    cx?.notify();
+  }
+
+  closeWorkspace() {
+    if (this.isCheck || !this.workspace) return;
+    try { this.workspace.close(); }
+    catch (error) { this.workspaceError = message(error); }
+  }
+
+  workspaceAutoToken() {
+    if (this.isCheck || this.closed || !this.workspace || !this.autoOpenWorkspace) return null;
+    try { return this.workspace.autoOpenToken(); }
+    catch (error) { this.workspaceError = message(error); return null; }
+  }
+
+  showStartedWorkspace(cx, viewerToken) {
+    this.syncState();
+    if (this.isCheck || this.closed || !this.workspace || !viewerToken) return;
+    const current = this.currentRun();
+    const stage = current && activeStage(current);
+    if (this.autoOpenWorkspace && stage?.terminal && ["running", "ready"].includes(stage.status)) {
+      try { this.workspace.autoOpen(current, viewerToken); this.workspaceError = null; }
+      catch (error) { this.workspaceError = message(error); }
+      cx?.notify();
+    }
   }
 
   disarm() {
@@ -309,6 +396,7 @@ export default class Team extends View {
   close() {
     this.closed = true;
     this.stopAutomatic();
+    this.closeWorkspace();
   }
 
   dismiss(cx) {
@@ -323,7 +411,7 @@ export default class Team extends View {
     this.screen = screen;
     this.notice = null;
     this.error = null;
-    if (screen !== "run") this.stopAutomatic();
+    if (screen !== "run") { this.stopAutomatic(); this.closeWorkspace(); }
     cx.notify();
   }
 
@@ -359,8 +447,11 @@ export default class Team extends View {
   }
 
   refresh(cx) {
-    if (this.isCheck || this.closed || this.busy || this.refreshing || this.screen !== "run") return;
+    if (this.isCheck || this.closed || this.screen !== "run") return;
     this.syncState();
+    // A launch/retry can change attempt identity before its async CLI setup ends.
+    // Keep the viewer current even while network/process refreshes are paused.
+    if (this.busy || this.refreshing) return;
     const current = this.currentRun();
     const stage = current && activeStage(current);
     if (!current || !["launching", "running", "ready"].includes(stage?.status)) return;
@@ -409,7 +500,9 @@ export default class Team extends View {
       this.reportDirty = false;
       this.armed = true;
       this.armedRunId = current.id;
+      const viewerToken = this.workspaceAutoToken();
       await this.runtime.launch(current.id);
+      this.showStartedWorkspace(cx, viewerToken);
     });
   }
 
@@ -422,6 +515,7 @@ export default class Team extends View {
       return;
     }
     this.stopAutomatic();
+    this.closeWorkspace();
     this.runtime.select(id);
     this.screen = "run";
     this.selectedStageId = null;
@@ -452,7 +546,9 @@ export default class Team extends View {
       this.selectedStageId = activeStage(current)?.id ?? null;
       this.reportEditing = false;
       this.reportDirty = false;
+      const viewerToken = this.workspaceAutoToken();
       await this.runtime.launch(current.id);
+      this.showStartedWorkspace(cx, viewerToken);
     });
   }
 
@@ -460,10 +556,12 @@ export default class Team extends View {
     this.perform(cx, "인수인계를 연결하는 중…", async () => {
       this.armed = true;
       this.armedRunId = current.id;
+      const viewerToken = this.workspaceAutoToken();
       await this.runtime.advance(current.id);
       this.selectedStageId = null;
       this.reportEditing = false;
       this.reportDirty = false;
+      this.showStartedWorkspace(cx, viewerToken);
     });
   }
 
@@ -488,6 +586,8 @@ export default class Team extends View {
 
   saveProfiles(cx) {
     const profiles = this.collectProfiles();
+    const invalid = this.profileDraft.find((profile) => this.profileEffortProblem(profile));
+    if (invalid) { this.error = this.profileEffortProblem(invalid); cx.notify(); return; }
     this.perform(cx, "역할 설정 저장 중…", () => {
       const saved = this.runtime.saveProfiles(profiles);
       this.setProfileEditors(saved);
@@ -517,7 +617,13 @@ export default class Team extends View {
   }
 
   assignee(profile) {
-    return `${this.toolName(profile.agent)} · ${profile.model || "도구 기본 모델"}`;
+    return `${this.toolName(profile.agent)} · ${profile.model || "도구 기본 모델"} · 추론 ${this.effortName(profile)}`;
+  }
+
+  effortName(profile) {
+    const effort = profile?.effort ?? "";
+    return effortOptions(profile?.agent, profile?.model ?? "").find((option) => option.id === effort)?.label
+      ?? (effort || "도구 기본값");
   }
 
   accessName(access) {
@@ -586,8 +692,8 @@ export default class Team extends View {
           .child(this.button(t, "team-pick-folder", "폴더 선택", (cx) => this.pickProject(cx))))
         .when(this.remoteProject, (element) => element.child(div().pt(6).text_size(11).text_color(t.blocked).child("현재 공간은 원격입니다. 이 작업에 사용할 로컬 프로젝트 폴더를 선택해 주세요."))))
       .child(v_flex().gap(9)
-        .child(h_flex().items_center().justify_between().child(this.label(t, "함께할 역할"))
-          .child(this.button(t, "team-edit-roles", "역할 설정", (cx) => this.navigate("profiles", cx), { small: true })))
+        .child(h_flex().items_center().justify_between().child(this.label(t, "역할 · 모델 · 추론 강도"))
+          .child(this.button(t, "team-edit-roles", "모델·추론 설정", (cx) => this.navigate("profiles", cx), { small: true })))
         .children(profiles.map((profile, index) => h_flex().px(12).py(9).gap(10).items_center().rounded(7).bg(t.raised)
           .child(div().size(23).flex_none().rounded(6).bg(t.background).text_color(t.accent).text_size(11).flex().items_center().justify_center().child(String(index + 1)))
           .child(v_flex().flex_1().min_w(0).gap(4)
@@ -595,10 +701,13 @@ export default class Team extends View {
             .child(div().text_size(10.5).text_color(t.dim).child(this.accessName(profile.access))))
           .child(v_flex().flex_1().min_w(0).gap(4)
             .child(div().text_size(12).text_color(t.muted).child(this.toolName(profile.agent)))
-            .child(div().id(`team-summary-model-${profile.id}`).truncate().tooltip(profile.model || "도구 기본 모델").text_size(10.5).text_color(t.dim).child(profile.model || "도구 기본 모델")))
+            .child(div().id(`team-summary-model-${profile.id}`).truncate().tooltip(profile.model || "도구 기본 모델").text_size(10.5).text_color(t.dim).child(profile.model || "도구 기본 모델"))
+            .child(div().id(`team-summary-effort-${profile.id}`).text_size(10.5).text_color(t.muted).child(`추론 강도: ${this.effortName(profile)}`)))
           .child(div().w(70).text_right().text_size(10.5).text_color(this.toolHint(profile.agent) === "설치 필요" ? t.blocked : t.dim).child(this.toolHint(profile.agent))))))
       .child(this.toggle(t, "team-new-auto", this.newAuto, "보고서가 준비되면 다음 역할 자동 실행", (cx) => { this.newAuto = !this.newAuto; cx.notify(); },
         "기본은 직접 확인 후 진행입니다. 자동 실행 중에도 보고서에 차단 이슈가 있으면 멈춥니다."))
+      .child(this.toggle(t, "team-new-workspace", this.autoOpenWorkspace, "시작하면 실시간 작업 화면 열기", (cx) => { this.autoOpenWorkspace = !this.autoOpenWorkspace; cx.notify(); },
+        "첫 역할이 실행되면 담당 AI의 터미널을 3분할 작업 화면으로 보여 줍니다."))
       .child(h_flex().gap(12).items_center()
         .child(this.button(t, "team-start", "AI 팀 시작", (cx) => this.start(cx), { primary: true, disabled: !valid }))
         .child(div().flex_1().text_size(11).text_color(t.dim).child("팀 기록은 프로젝트의 .ai-hub/team에 저장됩니다.")));
@@ -616,29 +725,50 @@ export default class Team extends View {
   }
 
   modelChoices(profile, t) {
-    const catalog = this.modelCatalogs[profile.agent] ?? { models: [], loading: false, loaded: false, error: null };
+    const sourceAgent = profile.agent;
+    const catalog = this.modelCatalog(profile);
     const query = this.modelSearchInputs[profile.id].value().trim().toLowerCase();
     const matches = catalog.models.filter((model) => !query || `${model.name ?? ""} ${model.id}`.toLowerCase().includes(query));
     const shown = matches.slice(0, MODEL_RESULTS);
     const selected = this.profileModels[profile.id].value().trim();
     return v_flex().p(10).gap(8).rounded(7).border_1().border_color(t.border).bg(t.background)
+      .child(this.button(t, `team-model-default-${profile.id}`, "도구 기본 모델 사용", (cx) => this.selectModel(profile.id, "", cx, sourceAgent), { small: true, primary: !selected }))
       .child(this.field(t, Input.new(this.modelSearchInputs[profile.id])).h(36))
       .child(div().text_size(10.5).text_color(t.dim).child(`${matches.length}개 검색 결과 · 전체 ${catalog.models.length}개${matches.length > MODEL_RESULTS ? ` · 처음 ${MODEL_RESULTS}개 표시, 검색어로 좁혀 주세요` : ""}`))
       .when(Boolean(catalog.error), (element) => element.child(div().text_size(11).text_color(t.blocked).child(catalog.error)))
-      .when(!shown.length, (element) => element.child(div().py(8).text_size(12).text_color(t.muted).child(catalog.loading ? "OpenCode에서 모델 목록을 확인하고 있습니다…" : query ? "일치하는 모델이 없습니다. 다른 검색어나 정확한 ID를 입력하세요." : "조회된 모델이 없습니다. 모델 목록을 불러오거나 정확한 ID를 직접 입력하세요.")))
+      .when(!shown.length, (element) => element.child(div().py(8).text_size(12).text_color(t.muted).child(catalog.loading ? "모델 목록을 확인하고 있습니다…" : query ? "일치하는 모델이 없습니다. 다른 검색어나 정확한 ID를 입력하세요." : "조회된 모델이 없습니다. 모델 목록을 불러오거나 정확한 ID를 직접 입력하세요.")))
       .when(Boolean(shown.length), (element) => element.child(v_flex().id(`team-model-list-${profile.id}`).h(Math.min(276, shown.length * 47 + 4)).min_h(0).overflow_y_scrollbar().gap(3)
         .children(shown.map((model, index) => h_flex().id(`team-model-option-${profile.id}-${index}`).h(44).flex_none().px(9).gap(8).items_center().rounded(5)
           .bg(model.id === selected ? t.selected : t.background).hover((style) => style.bg(t.hover)).cursor_pointer()
-          .on_click((_event, cx) => this.selectModel(profile.id, model.id, cx))
+          .on_click((_event, cx) => this.selectModel(profile.id, model.id, cx, sourceAgent))
           .child(div().flex_none().w(14).text_color(t.accent).child(model.id === selected ? "✓" : ""))
           .child(v_flex().flex_1().min_w(0).gap(3)
             .child(div().text_size(12).text_color(t.foreground).child(model.name || model.id))
             .child(div().id(`team-model-id-${profile.id}-${index}`).truncate().tooltip(model.id).text_size(10.5).text_color(t.dim).child(model.id)))))));
   }
 
+  effortChoices(profile, t) {
+    const model = this.profileModels[profile.id]?.value().trim() ?? profile.model ?? "";
+    const capability = this.modelCapability(profile);
+    const options = effortOptions(profile.agent, model, capability);
+    const problem = this.profileEffortProblem(profile);
+    return v_flex().id(`team-effort-${profile.id}`).gap(7)
+      .child(this.label(t, "추론 강도", "도구 기본값은 CLI 설정을 따름"))
+      .child(h_flex().gap(6).items_center().flex_wrap()
+        .children(options.map((option) => this.button(t, `team-effort-${profile.id}-${option.id || "default"}`, option.label ?? option.name ?? option.id,
+          (cx) => this.selectEffort(profile.id, option.id, cx), { small: true, primary: (profile.effort ?? "") === option.id }))))
+      .when(Boolean(problem), (element) => element.child(div().text_size(11).text_color(t.blocked).child(`${problem} 현재 값: ${profile.effort || "도구 기본값"}`)))
+      .when(Boolean(capability?.capabilityError), (element) => element.child(div().text_size(11).text_color(t.blocked).child(`추론 지원 정보 확인 실패: ${capability.capabilityError}`)))
+      .child(div().text_size(10.5).text_color(t.dim).child(profile.agent === "opencode"
+        ? "선택한 모델의 추론 설정을 사용합니다. 모델 목록에서 지원 항목을 확인할 수 있습니다."
+        : profile.agent === "codex" ? "로컬 모델 목록을 확인하면 해당 모델이 지원하는 추론 강도를 선택할 수 있습니다."
+          : profile.agent === "claude" ? "정확한 모델 ID를 선택하면 지원하는 추론 강도가 표시됩니다. 별칭은 도구 기본값을 사용합니다."
+            : "이 도구는 기본 추론 설정으로 실행됩니다."));
+  }
+
   profileView(profile, index, t) {
     const supported = MODEL_TOOLS.has(profile.agent);
-    const catalog = this.modelCatalogs[profile.agent];
+    const catalog = this.modelCatalog(profile);
     const currentModel = this.profileModels[profile.id].value();
     return v_flex().id(`team-profile-${profile.id}`).p(14).gap(12).rounded(9).border_1().border_color(t.border).bg(t.raised)
       .child(h_flex().gap(9).items_center()
@@ -667,14 +797,19 @@ export default class Team extends View {
           .when(Boolean(currentModel), (row) => row.child(this.button(t, `team-model-clear-${profile.id}`, "이전 모델 지정 지우기", (cx) => {
             this.profileModels[profile.id].set_value(""); this.updateProfilesDirty(); cx.notify();
           }, { small: true })))))
-        .when(profile.agent === "opencode", (element) => element
+        .when(supported, (element) => element
           .child(h_flex().gap(8).items_center().flex_wrap()
-            .child(this.button(t, `team-model-load-${profile.id}`, catalog?.loading ? "모델 목록 확인 중…" : catalog?.loaded ? "모델 목록 다시 불러오기" : "모델 목록 불러오기", (cx) => this.loadModels(profile, cx), { small: true, disabled: Boolean(catalog?.loading) }))
+            .when(profile.agent === "opencode", (row) => row.child(this.button(t, `team-model-load-${profile.id}`, catalog.loading ? "모델 목록 확인 중…" : catalog.loaded ? "모델 목록 다시 불러오기" : "모델 목록 불러오기", (cx) => this.loadModels(profile, cx), { small: true, disabled: Boolean(catalog.loading) })))
+            .when(profile.agent === "codex", (row) => row.child(this.button(t, `team-model-load-${profile.id}`, catalog.loading ? "로컬 모델 목록 확인 중…" : this.modelCatalogs.codex?.loaded ? "로컬 모델 목록 다시 확인" : "로컬 모델 목록 확인", (cx) => this.loadModels(profile, cx), { small: true, disabled: Boolean(catalog.loading) })))
             .when(Boolean(catalog?.loaded), (row) => row.child(this.button(t, `team-model-toggle-${profile.id}`, this.modelPicker === profile.id ? "목록 닫기" : "목록 보기", (cx) => {
               this.modelPicker = this.modelPicker === profile.id ? null : profile.id; this.agentPicker = null; cx.notify();
             }, { small: true }))))
-          .child(div().text_size(10.5).text_color(t.dim).child("OpenCode에 표시되는 provider/model 전체 ID를 그대로 사용합니다."))
+          .child(div().text_size(10.5).text_color(t.dim).child(profile.agent === "opencode"
+            ? "OpenCode에 표시되는 provider/model 전체 ID를 그대로 사용합니다."
+            : profile.agent === "codex" ? "로컬 캐시가 없으면 공식 프리셋을 표시합니다. 정확한 모델 ID도 직접 입력할 수 있습니다."
+              : "공식 모델 프리셋입니다. 계정·CLI 버전의 지원 여부를 확인하거나 정확한 모델 ID를 직접 입력하세요."))
           .when(this.modelPicker === profile.id, (row) => row.child(this.modelChoices(profile, t)))))
+      .child(this.effortChoices(profile, t))
       .child(v_flex().gap(5)
         .child(this.label(t, "작업 방식"))
         .child(h_flex().gap(7).items_center()
@@ -689,7 +824,7 @@ export default class Team extends View {
       .child(v_flex().id("team-profiles-scroll").flex_1().min_h(0).overflow_y_scrollbar().p(22).gap(14)
         .child(v_flex().gap(5).child(div().text_size(19).font_semibold().text_color(t.foreground).child("역할별 도구와 지침"))
           .child(div().text_size(12).text_color(t.muted).child("1~8개의 역할을 원하는 이름과 순서로 구성하세요. 저장한 설정은 새 작업에 적용됩니다."))
-          .child(div().text_size(11).text_color(t.dim).child("작업 방식은 AI에게 전달하는 역할 지침이며 운영체제 권한을 바꾸지 않습니다. 모델 지정은 Claude Code·Codex·OpenCode에서 지원합니다.")))
+          .child(div().text_size(11).text_color(t.dim).child("모델과 추론 강도를 역할마다 선택하세요. 작업 방식은 AI에게 전달하는 지침이며 운영체제 권한을 바꾸지 않습니다.")))
         .child(h_flex().gap(10).items_center()
           .child(this.button(t, "team-agent-refresh", this.agentsLoading ? "도구 확인 중…" : "설치된 도구 다시 확인", (cx) => this.loadAgents(cx), { small: true, disabled: this.agentsLoading }))
           .child(div().flex_1())
@@ -706,7 +841,7 @@ export default class Team extends View {
         .child(div().flex_1())
         .child(div().text_size(11).text_color(t.dim).child(this.profilesDirty ? "저장하지 않은 변경사항" : "저장된 역할 설정"))
         .when(this.profilesDirty, (element) => element.child(this.button(t, "team-profile-discard", "변경 취소", (cx) => this.discardProfiles(cx))))
-        .child(this.button(t, "team-profile-save", "역할 저장", (cx) => this.saveProfiles(cx), { primary: true, disabled: !this.profilesDirty })));
+        .child(this.button(t, "team-profile-save", "역할 저장", (cx) => this.saveProfiles(cx), { primary: true, disabled: !this.profilesDirty || this.profileDraft.some((profile) => this.profileEffortProblem(profile)) })));
   }
 
   stepsView(current, selected, t, compact) {
@@ -721,6 +856,7 @@ export default class Team extends View {
         .child(h_flex().gap(7).items_center().child(div().flex_1().text_size(11).text_color(t.muted).child(this.toolName(stage.agent)))
           .child(this.badge(t, stage.status)))
         .child(div().id(`team-stage-model-${stage.id}`).min_w(0).truncate().tooltip(stage.model || "도구 기본 모델").text_size(10.5).text_color(t.dim).child(stage.model || "도구 기본 모델"))
+        .child(div().id(`team-stage-effort-${stage.id}`).text_size(10.5).text_color(t.muted).child(`추론 강도: ${this.effortName(stage)}`))
         .child(div().text_size(10.5).text_color(t.dim).child(this.accessName(stage.access)))
         .when(Boolean(stage.terminal), (element) => element.child(this.button(t, `team-terminal-${stage.id}`, "터미널 열기", (cx) => {
           if (this.isCheck) return;
@@ -808,6 +944,39 @@ export default class Team extends View {
       .when(stage?.report?.status === "blocked", (element) => element.child(div().text_size(11).text_color(t.blocked).child("차단 이슈를 해결하고 보고서를 갱신한 뒤 다음 단계로 진행할 수 있습니다.")));
   }
 
+  liveWorkView(current, t) {
+    const stage = activeStage(current);
+    const terminalState = {
+      working: "AI 작업 중", blocked: "입력·권한 확인 기다림", idle: "CLI 응답 대기",
+      done: "CLI 응답 종료", finished: "프로세스 종료", unknown: "연결 상태 확인 중",
+    }[stage?.terminalState];
+    const detail = !stage ? "역할별 결과와 실행 기록을 확인할 수 있습니다."
+      : stage.launchUncertain ? "실행 응답을 확인하고 있습니다. 같은 시도를 중복 실행하지 않습니다."
+        : stage.status === "pending" ? "이 역할은 아직 실행하지 않았습니다. 아래 단계 실행으로 시작하세요."
+          : stage.status === "launching" ? "담당 AI의 실행 응답을 기다리고 있습니다."
+            : stage.status === "ready" ? "보고서가 준비되었습니다. 내용을 확인한 뒤 다음 역할에 인수인계하세요."
+              : stage.status === "error" ? "실행 또는 보고서 확인에 문제가 있습니다. 오류와 터미널을 확인하세요."
+                : stage.status === "stopped" ? "이 역할이 중지되었습니다. 상태와 결과를 확인한 뒤 다시 실행할 수 있습니다."
+                  : terminalState || "담당 AI의 터미널 상태를 확인하고 있습니다.";
+    return v_flex().id("team-live-work").p(15).gap(10).rounded(9).border_1().border_color(t.accent + "66").bg(t.raised)
+      .child(h_flex().gap(12).items_center().flex_wrap()
+        .child(v_flex().flex_1().min_w(0).gap(4)
+          .child(div().text_size(14).font_semibold().text_color(t.foreground).child("실시간 작업 화면"))
+          .child(div().text_size(11).text_color(t.muted).child("담당 AI의 터미널과 진행 상태를 3분할로 봅니다.")))
+        .child(this.button(t, "team-open-workspace", "실시간 작업 화면 열기", (cx) => this.openWorkspace(current, cx), { primary: true })))
+      .when(Boolean(stage), (element) => element.child(h_flex().gap(8).items_center().flex_wrap()
+        .child(div().text_size(12).font_medium().text_color(t.foreground).child(`현재 역할: ${stage.roleName} · ${this.toolName(stage.agent)}`))
+        .child(this.badge(t, current.status === "paused" ? "paused" : stage.status))))
+      .when(Boolean(stage), (element) => element.child(v_flex().gap(4)
+        .child(div().id("team-current-model").text_size(11.5).text_color(t.muted).child(`현재 실행 설정 · 모델: ${stage.model || "도구 기본 모델"}`))
+        .child(div().id("team-current-effort").text_size(11.5).text_color(t.muted).child(`추론 강도: ${this.effortName(stage)}`))
+        .child(div().text_size(10.5).text_color(t.dim).child("도구 기본값이나 별칭의 최종 모델은 터미널에서 확인할 수 있습니다."))))
+      .child(div().id("team-current-state").text_size(11.5).text_color(t.muted).child(detail))
+      .when(Boolean(stage?.error || stage?.reportError), (element) => element.child(div().id("team-live-error").text_size(11).text_color(t.blocked).child(stage.error || stage.reportError)))
+      .when(Boolean(this.workspaceError), (element) => element.child(div().id("team-workspace-error").text_size(11).text_color(t.blocked).child(`작업 화면을 열거나 갱신하지 못했습니다: ${this.workspaceError}`)))
+      .child(div().text_size(10.5).text_color(t.dim).child("화면을 여는 동작은 AI를 새로 실행하지 않습니다. 다음 역할은 아래의 인수인계 흐름으로 진행합니다."));
+  }
+
   runView(current, t) {
     const selected = this.selectedStage();
     const compact = this.width < 760;
@@ -819,6 +988,7 @@ export default class Team extends View {
             .child(this.badge(t, current.status, current.status === "completed" ? "팀 단계 완료" : null)))
           .child(div().text_size(12).text_color(t.muted).child(current.goal))
           .child(div().text_size(11).text_color(t.dim).child(current.folder)))
+        .child(this.liveWorkView(current, t))
         .child((compact ? v_flex() : h_flex()).w_full().min_w(0).items_start().gap(18)
           .child(this.stepsView(current, selected, t, compact))
           .child(this.reportView(current, selected, t))))

@@ -11,6 +11,8 @@ const {
   activeStage, nextStage, validateStart, updateStage, parseReport,
   buildPrompt, reportMarkdown, handoffText,
 } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+const optionsSource = await readFile(new URL("../defaults/mods/team/options.js", import.meta.url), "utf8");
+const { modelOptions, effortOptions, effortProblem } = await import(`data:text/javascript;base64,${Buffer.from(optionsSource).toString("base64")}`);
 
 const NOW = 1700000000000;
 function make(options = {}, injected = {}) {
@@ -65,6 +67,7 @@ test("defaults are independent and keep the four requested role assignments", ()
     ["review", "codex", "", "read", true], ["verify", "claude", "", "read", true],
   ]);
   for (const p of profiles.filter((p) => p.id !== "implement")) assert.match(p.instructions, /읽기 전용/);
+  assert.ok(profiles.every((profile) => profile.effort === ""));
   profiles[0].name = "changed";
   assert.equal(defaultProfiles()[0].name, "계획");
 });
@@ -159,6 +162,7 @@ test("customized legacy profiles and explicitly retained old assignments are not
     (p) => { p.pop(); },
     (p) => { p.push(customProfile("extra")); },
     (p) => { p[0].model = ""; },
+    (p) => { p[0].effort = ""; },
     (p) => { p[1].access = "read"; },
   ];
   for (const change of changes) {
@@ -446,8 +450,120 @@ test("handoff retains the user's goal and does not invent missing reports", () =
 
 test("stage updates cannot rewrite role snapshots or accept invalid state transitions", () => {
   const run = running(make());
-  for (const patch of [{ id: "review" }, { instructions: "new instructions" }, { agent: "other" }, { model: "other/model" }, { access: "write" }, { status: "pending" }, { sawWorking: "yes" }])
+  for (const patch of [{ id: "review" }, { instructions: "new instructions" }, { agent: "other" }, { model: "other/model" }, { effort: "high" }, { access: "write" }, { status: "pending" }, { sawWorking: "yes" }])
     assert.throws(() => updateStage(run, "plan", patch, NOW + 3));
   assert.throws(() => updateStage(run, "missing", { status: "error" }, NOW + 3), /단계/);
   assert.throws(() => updateStage(run, "plan", { status: "error" }, NaN), /시간/);
+});
+
+test("legacy profiles and stages without effort retain their models and receive no override", () => {
+  const profiles = defaultProfiles();
+  profiles[0].name = "개인 계획 담당";
+  profiles[0].model = "my-future-model";
+  const original = running(make({ profiles }));
+  const raw = { ...state(original), profiles, runs: [JSON.parse(JSON.stringify(original))] };
+  for (const profile of raw.profiles) delete profile.effort;
+  for (const stage of raw.runs[0].stages) delete stage.effort;
+  const before = JSON.stringify(raw);
+  const restored = readState(raw);
+  assert.ok(restored.profiles.every((profile) => profile.effort === ""));
+  assert.deepEqual(restored.runs[0], original);
+  assert.equal(restored.profiles[0].model, "my-future-model");
+  assert.equal(restored.profiles[0].name, "개인 계획 담당");
+  assert.equal(JSON.stringify(raw), before);
+});
+
+test("effort is an immutable run snapshot preserved through retries and handoff context", () => {
+  const profiles = defaultProfiles();
+  profiles[0].model = "claude-fable-5-2"; profiles[0].effort = "max";
+  let run = running(make({ profiles }));
+  profiles[0].effort = "low";
+  assert.equal(run.stages[0].effort, "max");
+  assert.equal(readState(state(run)).runs[0].stages[0].effort, "max");
+  run = updateStage(run, "plan", { status: "stopped" }, NOW + 10);
+  run = running(run);
+  assert.equal(run.stages[0].effort, "max");
+  assert.equal(run.stages[0].attempt, 2);
+  assert.match(buildPrompt(run, activeStage(run), reportPath(run)), /Configured reasoning effort[^\n]+"max"/);
+  run = ready(run);
+  assert.match(handoffText(run, activeStage(run)), /추론 강도: max/);
+  assert.match(handoffText(run, activeStage(run)), /실제 응답 설정의 확인 기록은 아님/);
+  run = complete(run); run = launching(run);
+  const nextPrompt = buildPrompt(run, activeStage(run), reportPath(run));
+  assert.ok(nextPrompt.includes('"configured":{"agent":"claude","model":"claude-fable-5-2","effort":"max"}'));
+  assert.match(nextPrompt, /not verified inference telemetry/);
+});
+
+test("effort strings are bounded data and unsupported values are preserved for explicit review", () => {
+  for (const effort of ["", "low", "xhigh", "max", "ultra", "custom-depth", "a".repeat(LIMITS.effort)]) {
+    const profile = customProfile("role-1", { model: "future-model", effort });
+    assert.equal(validateProfiles([profile])[0].effort, effort);
+    assert.equal(readState(state(make({ profiles: [profile] }))).runs[0].stages[0].effort, effort);
+  }
+  for (const effort of [null, 3, true, "High", "--high", "high low", "high\n", "high\u0000", "high\u2028", "$(run)", "high;run", "a".repeat(LIMITS.effort + 1)]) {
+    assert.throws(() => validateProfiles([customProfile("role-1", { effort })]), /추론 강도/);
+  }
+  const invalid = make(); invalid.stages[0].effort = "high\n";
+  assert.equal(readState(state(invalid)).runs.length, 0);
+  assert.notEqual(validateStart(invalid, invalid.stages[0]), null);
+});
+
+test("current documented model choices do not constrain custom model identities", () => {
+  const claude = modelOptions("claude"), codex = modelOptions("codex");
+  assert.ok(claude.some((entry) => entry.id === "claude-fable-5-2"));
+  assert.ok(claude.some((entry) => entry.id === "fable"));
+  assert.ok(codex.some((entry) => entry.id === "gpt-6.2-sol"));
+  assert.ok(codex.some((entry) => entry.id === "gpt-6.2-astra"));
+  assert.ok(codex.filter((entry) => entry.id).every((entry) => entry.source.startsWith("https://")));
+  assert.equal(claude[0].id, "");
+  claude[1].id = "changed";
+  assert.equal(modelOptions("claude")[1].id, "claude-fable-5-2");
+  for (const agent of ["custom", "constructor", "__proto__"]) assert.deepEqual(modelOptions(agent).map((entry) => entry.id), [""]);
+  assert.equal(validateProfiles([customProfile("role-1", { model: "provider/new-model-2030" })])[0].model, "provider/new-model-2030");
+});
+
+test("Claude effort choices avoid unsupported-level downgrades and alias guesses", () => {
+  const full = effortOptions("claude", "claude-fable-5-2").map((entry) => entry.id);
+  assert.deepEqual(full, ["", "low", "medium", "high", "xhigh", "max"]);
+  assert.equal(effortProblem("claude", "claude-fable-5-2", "max"), null);
+  assert.match(effortProblem("claude", "claude-fable-5-2", "ultracode"), /지원하지/);
+  assert.equal(effortProblem("claude", "claude-opus-4-6", "high"), null);
+  assert.match(effortProblem("claude", "claude-opus-4-6", "xhigh"), /지원하지/);
+  for (const model of ["", "fable", "opus", "sonnet", "haiku", "custom-gateway-model", "constructor"]) {
+    assert.deepEqual(effortOptions("claude", model).map((entry) => entry.id), [""]);
+    assert.notEqual(effortProblem("claude", model, "high"), null);
+  }
+  assert.equal(effortProblem("claude", "fable", "max", { id: "fable", efforts: ["high", "max"] }), null);
+});
+
+test("Codex and OpenCode effort choices use exact catalog metadata without a fallback", () => {
+  for (const [agent, model, efforts] of [
+    ["codex", "gpt-6.2-sol", ["low", "medium", "high", "xhigh", "max", "ultra"]],
+    ["opencode", "opencode-go/deepseek-v4.1-flash", ["fast", "deep"]],
+  ]) {
+    assert.deepEqual(effortOptions(agent, model).map((entry) => entry.id), [""]);
+    assert.match(effortProblem(agent, model, "high"), /확인하지 못했습니다/);
+    const capability = { id: model, efforts };
+    assert.deepEqual(effortOptions(agent, model, capability).map((entry) => entry.id), ["", ...efforts]);
+    for (const effort of efforts) assert.equal(effortProblem(agent, model, effort, capability), null);
+    assert.match(effortProblem(agent, model, "unsupported", capability), /지원하지/);
+    assert.match(effortProblem(agent, "another-model", efforts[0], capability), /확인하지 못했습니다/);
+    assert.equal(effortProblem(agent, model, ""), null);
+  }
+  assert.match(effortProblem("gemini", "model", "high"), /지원하지/);
+});
+
+test("missing, empty or malformed effort metadata cannot invent capability", () => {
+  const model = "claude-fable-5-2";
+  assert.deepEqual(effortOptions("claude", model, { efforts: [] }).map((entry) => entry.id), [""]);
+  assert.match(effortProblem("claude", model, "high", { efforts: [] }), /지원하지/);
+  for (const capability of [[], "high", { efforts: null }, { efforts: "high" }, { efforts: ["--unsafe"] }, { efforts: ["high\n"] }, { efforts: Array(33).fill("high") }, { id: "different", efforts: ["high"] }]) {
+    assert.deepEqual(effortOptions("claude", model, capability).map((entry) => entry.id), [""]);
+    assert.notEqual(effortProblem("claude", model, "high", capability), null);
+  }
+  const capability = { id: "new-codex", efforts: ["high", "high", "constructor"] };
+  assert.deepEqual(effortOptions("codex", "new-codex", capability).map((entry) => entry.id), ["", "high", "constructor"]);
+  assert.equal(effortOptions("codex", "new-codex", capability).at(-1).label, "constructor");
+  const options = effortOptions("claude", model); options[1].label = "changed";
+  assert.notEqual(effortOptions("claude", model)[1].label, "changed");
 });

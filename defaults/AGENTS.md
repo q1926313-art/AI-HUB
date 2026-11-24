@@ -987,11 +987,17 @@ palette, or `herdr-app do mod.open --name team`. It runs an ordered local team.
 Defaults: plan (Claude Code), implement (OpenCode Go, model
 `opencode-go/deepseek-v4.1-flash`), review (Codex), verify (Claude Code).
 The person can add/remove/reorder 1–8 roles and edit their name, installed agent,
-model, instructions and `access` (`read` advisory or `write` implementation).
+model, reasoning effort, instructions and `access` (`read` advisory or `write` implementation).
 At least one role must remain enabled. Model IDs are bounded data, not arguments.
 Explicit models are supported for Claude Code, Codex and OpenCode; blank means
 the configured CLI default. OpenCode model IDs include the provider prefix.
-Its list comes from `opencode models` in the selected project; selecting a model
+Claude/Codex have documented model presets and all three support explicit IDs.
+Model catalogs supply supported reasoning levels where available; blank effort
+keeps the tool's default. Do not silently downgrade an unsupported level or infer
+capabilities from a similar model name. A role's model and effort are copied into
+the run alongside its other settings. Display these as requested launch settings,
+not proof that a provider resolved an alias to a particular model.
+OpenCode's list comes from `opencode models` in the selected project; selecting a model
 does not prove account access or the actual model used by a provider alias.
 The Go alias above maps to DeepSeek V4.1 Flash 1017 in the official catalog checked
 on 2026-11-24; it does not pin a dated snapshot indefinitely.
@@ -1007,6 +1013,26 @@ and exact `aihub.run`, `aihub.stage`, `aihub.attempt`, `herdr.space`, `herdr.tab
 labels. Keep the program's configured arguments and permission prompts. Do not
 add permission-bypass flags. Never retry an uncertain launch blindly: locate the
 original terminal by its labels before deciding what happened.
+The CLI's `run --json` and `ls --json` responses are compact records without labels;
+fetch each candidate with `get <address> --json` before verifying ownership.
+
+**실시간 작업 화면** opens the team's existing terminals in a separate native
+window: Claude on the left (65%), Codex at upper right, OpenCode at lower right.
+Its toolbar offers 55/65/75% widths; each pane's **담당** menu can follow one tool's
+latest started role or pin a specific role. Unstarted roles show waiting cards,
+and finished roles without a live terminal show their report summary. This view
+does not start extra agents or turn the ordered workflow into parallel execution.
+Only terminals with matching run/stage/attempt labels are attached; a stale attempt
+or ambiguous match remains a placeholder. A terminal is attached only once even
+if two slots select it. Actual output, CLI tool calls and permission prompts remain
+interactive in the native terminal; provider-private reasoning is not invented.
+
+The original Team controller stays open behind this window and owns handoffs.
+**팀 관리 · 보고서** returns to it. Closing the viewer does not restart or interrupt
+work. Closing/leaving Team still disarms automation and closes its viewer.
+The native window closes if an attached terminal ends; use Team's workspace button
+to inspect the remaining roles again. The view's `ai-hub.team.workspace.v1` shared
+preferences never authorize execution or automatically reopen a viewer on restart.
 
 Before starting OpenCode with a chosen model, require its exact ID in the local
 model list and inspect CLI help for supported model/prompt flags. The root TUI
@@ -1033,7 +1059,7 @@ lost terminals, and malformed reports do not count as success. Stop automatic
 progression separately from interrupting the current AI. Reopening a record does
 not arm it; starting or advancing it does. Closing or leaving the panel and
 editing a report disarm it. Keep `model.js` pure and the runtime host-injected;
-`node --test scripts/test_team.mjs scripts/test_team_runtime.mjs` checks their
+`node --test scripts/test_team.mjs scripts/test_team_runtime.mjs scripts/test_team_workspace.mjs` checks their
 contracts. `checking()` must render the team UI without spawning workers,
 writing data, or installing timers.
 

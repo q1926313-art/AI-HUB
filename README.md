@@ -40,8 +40,14 @@ AI Hub는 [Herdr 데스크톱 앱](https://github.com/herdrdev/herdr-app) `0.1.1
 | 검증 | Claude Code | 검사 결과와 남은 문제 확인 |
 
 **역할 설정**에서 역할 이름·순서·지침·작업 방식을 바꾸고, 최대 8개 역할을 추가·삭제하거나 끌 수 있습니다.
-담당 도구와 모델도 역할마다 지정합니다. OpenCode는 설치된 CLI의 모델 목록을 불러와 선택하거나
-정확한 `provider/model` 값을 입력할 수 있습니다. Claude Code·Codex는 모델 이름을 직접 지정할 수 있습니다.
+담당 도구·모델·추론 강도를 역할마다 지정합니다. Claude Code·Codex는 모델 선택 목록과 직접 입력을
+지원하며, OpenCode는 설치된 CLI의 목록에서 정확한 `provider/model`을 선택합니다.
+추론 강도는 선택한 모델과 도구에서 확인되는 지원값을 사용하며, 비워 두면 도구의 기본값을 유지합니다.
+
+**실시간 작업 화면**에서는 팀이 실제 실행한 터미널을 봅니다. 기본 배치는 Claude 왼쪽 65%,
+Codex 오른쪽 위, OpenCode 오른쪽 아래입니다. 각 칸의 담당을 바꾸거나 왼쪽 너비를 55/65/75%로
+설정할 수 있습니다. 아직 차례가 오지 않은 역할은 대기 상태로 표시하고, Claude 칸은 계획에서
+검증 역할로 이어집니다. **팀 관리 · 보고서**를 눌러 인수인계와 중지 버튼으로 돌아옵니다.
 
 기본 DeepSeek 선택값은 `opencode-go/deepseek-v4.1-flash`입니다.
 [공식 Go 모델 목록](https://models.opencode.ai/providers/opencode-go/)에서 2026-11-24에

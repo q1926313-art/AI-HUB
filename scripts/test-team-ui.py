@@ -21,13 +21,18 @@ import uuid
 
 
 REPO = Path(__file__).resolve().parent.parent
-SCENARIOS = ("empty", "draft", "running", "ready", "error", "history", "profiles", "models")
+PROFILE_SCENARIOS = ("profiles", "models", "claude-models", "codex-models", "effort-unsupported")
+WORKSPACE_SCENARIOS = ("workspace-toolbar", "workspace-header", "workspace-placeholder", "workspace-picker")
+SCENARIOS = ("empty", "draft", "running", "ready", "error", "busy-refresh", "history", *PROFILE_SCENARIOS, *WORKSPACE_SCENARIOS)
 
 
 def fixture_entry(scenario: str) -> str:
     """Exercise the shipped view; only its in-memory check state is replaced."""
+    if scenario in WORKSPACE_SCENARIOS:
+        return workspace_fixture_entry(scenario.removeprefix("workspace-"))
     return """import Team from './mods/team/main.js';
 import { createRun, defaultProfiles, readState, updateStage } from './mods/team/model.js';
+import { createWorkspace, dismissWorkspace, WORKSPACE_KEY } from './mods/team/workspace.js';
 
 export default class NativeTeamFixture extends Team {
   init(props, cx) {
@@ -35,7 +40,7 @@ export default class NativeTeamFixture extends Team {
     const scenario = SCENARIO;
     const now = 1700000000000;
     const profiles = defaultProfiles();
-    if (scenario === 'profiles' || scenario === 'models') {
+    if (['profiles', 'models', 'claude-models', 'codex-models', 'effort-unsupported'].includes(scenario)) {
       this.screen = 'profiles';
       this.agentsLoading = false;
       this.agents = [
@@ -43,6 +48,10 @@ export default class NativeTeamFixture extends Team {
         { key: 'codex', name: 'Codex', installed: false },
         { key: 'opencode', name: 'OpenCode', installed: true },
       ];
+      this.modelCatalogs.opencode = {
+        models: [{ id: 'opencode-go/deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash 1017', efforts: ['low', 'high'] }],
+        loading: false, error: null, loaded: true,
+      };
       if (scenario === 'profiles') {
         // Exercise native editor values and a non-default role count/order.
         // Input/Textarea values are not included in --print-spec, so check
@@ -59,6 +68,7 @@ export default class NativeTeamFixture extends Team {
         ]);
         this.profileNames[customId].set_value('Native custom validation');
         this.profileModels[customId].set_value('opencode-go/deepseek-v4.1-flash');
+        this.selectEffort(customId, 'high', cx);
         this.profileInputs[customId].set_value('Native custom instructions after editing.');
         this.moveRole(customId, -1, cx);
         this.moveRole(customId, -1, cx);
@@ -67,16 +77,17 @@ export default class NativeTeamFixture extends Team {
           || edited[0].name !== 'Native custom validation'
           || edited[0].agent !== 'opencode'
           || edited[0].model !== 'opencode-go/deepseek-v4.1-flash'
+          || edited[0].effort !== 'high'
           || edited[0].instructions !== 'Native custom instructions after editing.'
           || edited[0].access !== 'read' || edited[1].access !== 'write'
           || !this.profilesDirty) {
           throw new Error('Native custom role edits or order were not preserved.');
         }
         this.agentPicker = customId;
-      } else {
+      } else if (scenario === 'models') {
         this.modelCatalogs.opencode = {
           models: [
-            { id: 'opencode-go/deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash 1017' },
+            { id: 'opencode-go/deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash 1017', efforts: ['low', 'high'] },
             { id: 'fixture-provider/unrelated-model', name: 'Native unrelated model' },
           ],
           loading: false, error: null, loaded: true,
@@ -88,8 +99,49 @@ export default class NativeTeamFixture extends Team {
           || this.profilesDirty) {
           throw new Error('Native model search changed the saved role or lost its model ID.');
         }
+        this.folderInput.set_value('/tmp/another-opencode-project');
+        const implementation = this.profileDraft.find((profile) => profile.id === 'implement');
+        if (this.modelCatalog(implementation).loaded || this.modelCapability(implementation)
+          || this.profileModels.implement.value() !== 'opencode-go/deepseek-v4.1-flash') {
+          throw new Error('OpenCode reused another project catalog or discarded the selected model.');
+        }
+        this.folderInput.set_value('');
+        if (!this.modelCapability(implementation)?.efforts?.includes('high')) {
+          throw new Error('The matching project catalog lost its effort metadata.');
+        }
+      } else if (scenario === 'claude-models') {
+        this.selectModel('plan', 'claude-opus-5-5', cx, 'claude');
+        this.selectEffort('plan', 'high', cx);
+        this.modelPicker = 'plan';
+        this.modelSearchInputs.plan.set_value('CLAUDE-OPUS-5-5');
+        const plan = this.collectProfiles().find((profile) => profile.id === 'plan');
+        if (plan.model !== 'claude-opus-5-5' || plan.effort !== 'high' || !this.profilesDirty
+          || this.profileEffortProblem(plan)) throw new Error('Claude model/effort selection was not preserved.');
+      } else if (scenario === 'codex-models') {
+        this.modelCatalogs.codex = {
+          models: [{ id: 'native-codex-model', name: 'Native Codex cached model', source: 'codex-cache', efforts: ['low', 'xhigh'] }],
+          loading: false, error: null, loaded: true,
+        };
+        this.selectModel('review', 'native-codex-model', cx, 'codex');
+        this.selectEffort('review', 'xhigh', cx);
+        this.modelPicker = 'review';
+        const review = this.collectProfiles().find((profile) => profile.id === 'review');
+        if (review.model !== 'native-codex-model' || review.effort !== 'xhigh' || !this.profilesDirty
+          || this.profileEffortProblem(review)) throw new Error('Codex cache capability was not used for effort selection.');
+      } else {
+        this.profileModels.plan.set_value('claude-opus-5-5');
+        const plan = this.profileDraft.find((profile) => profile.id === 'plan');
+        plan.effort = 'ultra';
+        this.updateProfilesDirty();
+        if (!this.profileEffortProblem(plan) || this.collectProfiles()[0].effort !== 'ultra') {
+          throw new Error('An unsupported stored effort was silently removed or accepted.');
+        }
       }
       return;
+    }
+    if (scenario === 'running') {
+      profiles[0].model = 'claude-opus-5-5';
+      profiles[0].effort = 'high';
     }
     let run = createRun({
       title: `Native ${scenario} fixture`,
@@ -117,6 +169,10 @@ export default class NativeTeamFixture extends Team {
         status: 'error', error: 'Native fixture launch failed', finishedAt: now + 3,
       }, now + 3);
     }
+    if (scenario === 'busy-refresh') {
+      run = updateStage(run, 'plan', { status: 'error', error: 'Retry fixture' }, now + 3);
+      run = updateStage(run, 'plan', { status: 'launching', attempt: 2, terminal: null }, now + 4);
+    }
     if (scenario === 'history') {
       for (const stage of run.stages) {
         run = updateStage(run, stage.id, { status: 'launching', attempt: 1 }, now + 1);
@@ -130,14 +186,82 @@ export default class NativeTeamFixture extends Team {
     this.state = readState(JSON.stringify({
       version: 1, profiles, runs: [run], selectedRunId: run.id,
     }));
+    if (scenario === 'running' && (this.state.runs[0].stages[0].model !== 'claude-opus-5-5'
+      || this.state.runs[0].stages[0].effort !== 'high')) throw new Error('The running stage lost its requested model or effort.');
     this.screen = scenario === 'history' ? 'history' : 'run';
     this.selectedStageId = 'plan';
     this.agentsLoading = false;
     this.setReportEditor(this.state.runs[0].stages[0]);
     this.reportEditing = scenario === 'ready';
+    if (scenario === 'running') {
+      let memory = null, opened = 0;
+      const host = { shared: () => memory, setShared: (_key, value) => { memory = value; },
+        terminals: () => [], openOverlay: () => 'fixture-' + (++opened), closeOverlay: () => {} };
+      this.runtime = { getState: () => this.state };
+      this.workspace = createWorkspace(host);
+      this.isCheck = false;
+      this.workspace.open(this.currentRun());
+      const token = this.workspaceAutoToken();
+      const beforeClose = host.shared(WORKSPACE_KEY);
+      dismissWorkspace(host, beforeClose.owner, beforeClose.generation);
+      this.showStartedWorkspace(cx, token);
+      if (opened !== 1) throw new Error('Automatic completion reopened a workspace closed during setup.');
+      this.openWorkspace(this.currentRun(), cx);
+      if (opened !== 2) throw new Error('An explicit request could not reopen the workspace.');
+      this.isCheck = true;
+      this.runtime = null;
+      this.workspace = null;
+    }
+    if (scenario === 'busy-refresh') {
+      const synced = [];
+      // Inject in-memory collaborators only; no native process, timer or write.
+      this.runtime = { getState: () => this.state, refresh: () => { throw new Error('Busy refresh started another request.'); } };
+      this.workspace = { sync: (current) => synced.push(current.stages[0]) };
+      this.isCheck = false;
+      this.busy = 'Native deferred retry setup';
+      this.refresh(cx);
+      this.busy = null;
+      this.refreshing = true;
+      this.refresh(cx);
+      if (synced.length !== 2 || synced.some((stage) => stage.attempt !== 2 || stage.terminal !== null)) {
+        throw new Error('Busy setup did not refresh the viewer with the latest attempt.');
+      }
+      this.refreshing = false;
+      this.isCheck = true;
+      this.runtime = null;
+      this.workspace = null;
+    }
   }
 }
 """.replace("SCENARIO", json.dumps(scenario))
+
+
+def workspace_fixture_entry(role: str) -> str:
+    """Check actual workspace chrome without a process, live terminal, or writes."""
+    return """import Workspace from './mods/team-workspace/main.js';
+import { createRun, defaultProfiles, updateStage } from './mods/team/model.js';
+
+export default class NativeWorkspaceFixture extends Workspace {
+  init(props, cx) {
+    super.init(props, cx);
+    const role = ROLE;
+    const profiles = defaultProfiles();
+    profiles[0].model = 'claude-opus-5-5';
+    profiles[0].effort = 'high';
+    let current = createRun({
+      title: 'Native workspace fixture', goal: 'Show existing work without starting another agent.',
+      folder: '/tmp/ai-hub-workspace-fixture', profiles, autoAdvance: false,
+    }, { id: 'aihub-workspace-fixture', now: 1700000000000 });
+    if (role !== 'placeholder') {
+      current = updateStage(current, 'plan', { status: 'launching', attempt: 1 }, current.updatedAt + 1);
+      current = updateStage(current, 'plan', { status: 'running', terminal: 't-native-workspace' }, current.updatedAt + 1);
+    }
+    this.info = { role, runId: current.id, owner: 'native-check', generation: 1,
+      binding: { slot: 'left', choice: 'agent:claude', stageId: 'plan', attempt: current.stages[0].attempt, terminal: null } };
+    this.current = () => current;
+  }
+}
+""".replace("ROLE", json.dumps(role))
 
 
 def run_check(command: list[str], env: dict[str, str], seconds: int) -> tuple[int, str, str]:
@@ -216,27 +340,44 @@ def main() -> int:
                     errors.append(f"checker exited {code}")
                 if "check passed: " not in stdout:
                     errors.append("checker did not confirm native materialization")
-                expected = ["AI 팀"]
+                expected = [] if scenario in WORKSPACE_SCENARIOS else ["AI 팀"]
                 if scenario == "empty":
-                    expected.extend(["어떤 일을 함께 할까요?", "AI 팀 시작"])
-                elif scenario in ("profiles", "models"):
+                    expected.extend(["어떤 일을 함께 할까요?", "AI 팀 시작", "모델·추론 설정", "시작하면 실시간 작업 화면 열기", "추론 강도"])
+                elif scenario in PROFILE_SCENARIOS:
                     expected.extend([
                         "역할별 도구와 지침", "역할 저장", "설치 필요", "OpenCode",
-                        "Input #", "Textarea #", "자문·검토", "구현·수정",
+                        "Input #", "Textarea #", "자문·검토", "구현·수정", "추론 강도",
                     ])
                     if scenario == "profiles":
                         expected.extend([
                             "3/8개 역할", "저장하지 않은 변경사항", "↑ 위로", "↓ 아래로", "역할 삭제",
                             "team-profile-custom-check", "team-profile-implement", "team-profile-plan",
                         ])
-                    else:
+                    elif scenario == "models":
                         expected.extend([
                             "모델 목록 다시 불러오기", "1개 검색 결과 · 전체 2개",
                             "DeepSeek V4.1 Flash 1017", "opencode-go/deepseek-v4.1-flash",
                             "team-model-option-implement-0", "저장된 역할 설정",
                         ])
+                    elif scenario == "claude-models":
+                        expected.extend(["Claude Opus 5.5", "claude-opus-5-5", "team-model-option-plan-0", "team-effort-plan-high", "높음 (high)"])
+                    elif scenario == "codex-models":
+                        expected.extend(["Native Codex cached model", "native-codex-model", "team-model-option-review-0", "team-effort-review-xhigh", "매우 높음 (xhigh)"])
+                    else:
+                        expected.extend(["현재 값: ultra", "지원하지 않습니다", "team-effort-plan-default"])
+                elif scenario in WORKSPACE_SCENARIOS:
+                    expected.extend({
+                        "workspace-toolbar": ["Native workspace fixture", "계획", "수동 인수인계", "팀 관리 · 보고서", "workspace-ratio-65"],
+                        "workspace-header": ["Claude Code · 계획", "claude-opus-5-5", "추론 high", "역할 자동 연결", "workspace-assign-left"],
+                        "workspace-placeholder": ["앞 역할의 인수인계를 기다립니다", "실제 작업 화면이 나타납니다", "workspace-placeholder-left"],
+                        "workspace-picker": ["이 칸에 표시할 담당", "Claude Code · 현재 역할 따라가기", "계획 · Claude Code", "구현 · OpenCode", "검토 · Codex"],
+                    }[scenario])
                 else:
                     expected.append(f"Native {scenario} fixture")
+                    if scenario != "history":
+                        expected.extend(["실시간 작업 화면 열기", "team-open-workspace", "team-current-model", "추론 강도"])
+                if scenario == "running":
+                    expected.extend(["claude-opus-5-5", "높음 (high)", "현재 실행 설정"])
                 if scenario == "ready":
                     expected.append("Native review fixture report")
                 if scenario == "error":
@@ -254,6 +395,8 @@ def main() -> int:
                     for value in ("Native unrelated model", "fixture-provider/unrelated-model"):
                         if value in stdout:
                             errors.append(f"model search exposed an unrelated result: {value}")
+                if scenario in WORKSPACE_SCENARIOS and ("undefined ·" in stdout or "· undefined" in stdout):
+                    errors.append("workspace chrome used an undefined role label")
                 if "check: mod " in stdout + stderr:
                     errors.append("the checking view attempted a real process or file-write side effect")
                 result = {"name": scenario, "exit_code": code, "passed": not errors, "errors": errors}
