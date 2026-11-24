@@ -35,7 +35,7 @@ jobs:
           git merge --allow-unrelated-histories --no-commit --no-ff FETCH_HEAD
           git apply --index .ai-hub-bootstrap/import.patch
           git rm -- .ai-hub-bootstrap/import.patch .github/workflows/import-ai-hub.yml
-          git diff --cached --check
+          git diff --cached --check 2d1464e02ddad5484eaaf9a5b59b594e3930aeba
           actual_tree=$(git write-tree)
           test "$actual_tree" = "$EXPECTED_TREE"
           git commit -m 'feat: import herdr desktop as ai hub with independent windows distribution'
