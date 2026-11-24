@@ -12,6 +12,8 @@ const owned = (terminal, current, stage) => terminal?.labels?.["aihub.run"] === 
 const walk = (node) => node ? [node, ...(node.children ?? []).flatMap(walk)] : [];
 const terminalAddresses = (root) => walk(root).map((node) => node.content?.terminal).filter(Boolean);
 const alive = (terminal) => terminal?.state !== "finished";
+const layoutConflict = (error) => String(error?.message ?? error)
+  .includes("tab.layout changed; read it again before saving");
 
 export function choicesFor(current) {
   const agents = [...new Set((current?.stages ?? []).map((stage) => stage.agent))];
@@ -210,8 +212,9 @@ export function createWorkspace(host) {
       const slot = SLOTS.find((item) => selectStage(current, prefs.choices[item])?.agent === stage.agent) ?? "left";
       prefs = { ...prefs, choices: { ...prefs.choices, [slot]: "stage:" + stageId }, picker: null };
     }
-    const live = host.terminals();
-    const signature = JSON.stringify({ runId: current.id, tabId: record.tab, ...prefs, bindings: bindingsFor(current, live, prefs) });
+    let live = host.terminals();
+    const describe = () => JSON.stringify({ runId: current.id, tabId: record.tab, ...prefs, bindings: bindingsFor(current, live, prefs) });
+    let signature = describe();
     const focusTab = async () => {
       await invoke("tab.select", { id: record.tab });
       if (stageId) {
@@ -232,18 +235,41 @@ export function createWorkspace(host) {
     host.setShared(WORKSPACE_KEY, session);
     try {
       const context = { spaceId: placement.spaceId, managerTabId: placement.tabId, workspaceTabId: record.tab };
-      const layout = workspaceLayout(current, live, prefs, owner, generation, context, record.layout);
-      const requested = new Set(terminalAddresses(layout)), already = new Set(terminalAddresses(record.layout));
-      const adopt = [];
-      for (const terminal of live) {
-        if (!requested.has(terminal.address) || already.has(terminal.address)) continue;
-        const stage = current.stages.find((entry) => owned(terminal, current, entry));
-        if (!stage) throw new Error("다른 작업의 터미널은 팀 작업 탭으로 옮길 수 없습니다.");
-        adopt.push({ terminal: terminal.address, labels: {
-          "aihub.run": current.id, "aihub.stage": stage.id, "aihub.attempt": String(stage.attempt),
-        } });
+      for (let attempt = 0; attempt < 3; attempt++) {
+        ensureUnmodifiedControls(record.layout, record.tab);
+        const layout = workspaceLayout(current, live, prefs, owner, generation, context, record.layout);
+        const requested = new Set(terminalAddresses(layout)), already = new Set(terminalAddresses(record.layout));
+        const adopt = [];
+        for (const terminal of live) {
+          if (!requested.has(terminal.address) || already.has(terminal.address)) continue;
+          const stage = current.stages.find((entry) => owned(terminal, current, entry));
+          if (!stage) throw new Error("다른 작업의 터미널은 팀 작업 탭으로 옮길 수 없습니다.");
+          adopt.push({ terminal: terminal.address, labels: {
+            "aihub.run": current.id, "aihub.stage": stage.id, "aihub.attempt": String(stage.attempt),
+          } });
+        }
+        try {
+          await invoke("tab.layout", { id: record.tab, layout, expected: record.layout, adopt });
+          break;
+        } catch (error) {
+          if (!layoutConflict(error) || attempt === 2) throw error;
+          // A native terminal arrival can change the archive between the read
+          // and write. Re-read this same tab and preserve every new terminal;
+          // do not overwrite stale data or turn a retry into tab creation.
+          if (closed || !space()) return null;
+          let latest = host.shared(WORKSPACE_KEY);
+          if (!latest?.open || latest.owner !== owner || latest.generation !== generation) return null;
+          const refreshed = await readTab(record.tab);
+          if (closed || !space()) return null;
+          if (!refreshed) { dismissWorkspace(host, owner, generation); return null; }
+          latest = host.shared(WORKSPACE_KEY);
+          if (!latest?.open || latest.owner !== owner || latest.generation !== generation) return null;
+          record = refreshed;
+          prefs = preferences(current, latest);
+          live = host.terminals();
+          signature = describe();
+        }
       }
-      await invoke("tab.layout", { id: record.tab, layout, expected: record.layout, adopt });
       if (closed || !space()) return null;
       const latest = host.shared(WORKSPACE_KEY);
       if (!latest?.open || latest.owner !== owner || latest.generation !== generation) return null;

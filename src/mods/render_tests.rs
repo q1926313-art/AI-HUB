@@ -708,6 +708,182 @@ impl gpui::Render for RootedView {
     }
 }
 
+// AI Hub: check the real event/AsyncContext boundary, not a permanently-valid
+// JavaScript cx mock. No provider, terminal or user project is started here.
+#[gpui::test]
+fn team_clicks_resume_with_the_spawned_context(cx: &mut TestAppContext) {
+    use gpui::{AppContext as _, Modifiers, MouseButton, VisualTestContext, point, px};
+
+    cx.update(gpui_shell::init);
+    for action in ["expired-control", "start", "launch", "advance", "workspace", "stage", "workspace-error", "back"] {
+        let staged = Staged::new();
+        let source = r#"
+import { div } from 'gpui-kit';
+import { v_flex } from 'gpui-base';
+import { theme } from 'herdr';
+import { wait } from 'team-click-fixture';
+import Team from './mods/team/main.js';
+import WorkspaceView from './mods/team/workspace-view.js';
+import { createRun, readState, updateStage } from './mods/team/model.js';
+const ACTION = __ACTION__;
+export default class ClickFixture extends Team {
+  init(_, cx) {
+    // checking=true keeps the real Team init inert. Only these memory-only
+    // collaborators are enabled afterward; the real button and methods run.
+    super.init({embedded:true,space:'team-space',tab:'manager-tab',pane:'manager-pane'}, cx);
+    let current = createRun({title:'Native callback',goal:'Resume one requested action',folder:'/fixture/project'},
+      {id:'native-callback',now:1700000000000});
+    if (ACTION === 'advance') {
+      current = updateStage(current,'plan',{status:'launching',attempt:1},current.updatedAt+1);
+      current = updateStage(current,'plan',{status:'running',terminal:'fixture-plan'},current.updatedAt+1);
+      current = updateStage(current,'plan',{status:'ready',report:{runId:current.id,stageId:'plan',attempt:1,
+        status:'completed',summary:'Ready',changes:[],tests:[],issues:[],next:'Continue'}},current.updatedAt+1);
+    }
+    this.state = readState({version:1,profiles:[],runs:[current],selectedRunId:current.id});
+    this.isCheck = false;
+    this.screen = ACTION === 'start' ? 'new' : 'run';
+    this.titleInput.set_value('Native callback');
+    this.goalInput.set_value('Resume one requested action');
+    this.folderInput.set_value('/fixture/project');
+    this.selectedStageId = 'plan';
+    this.agentsLoading = false;
+    this.armed = true;
+    this.armedRunId = current.id;
+    this.opened = false;
+    const launch = async (advance) => {
+      await wait();
+      let value = this.currentRun();
+      if (advance) value = updateStage(value,'plan',{status:'completed'},value.updatedAt+1);
+      const id = advance ? 'implement' : 'plan';
+      value = updateStage(value,id,{status:'launching',attempt:1},value.updatedAt+1);
+      value = updateStage(value,id,{status:'running',terminal:'fixture-terminal'},value.updatedAt+1);
+      this.state.runs = this.state.runs.map(run => run.id === value.id ? value : run);
+      return value;
+    };
+    this.runtime = {
+      getState: () => this.state,
+      create: (input) => {
+        const value = createRun(input,{id:'native-started',now:1700000000001});
+        this.state.runs.unshift(value);this.state.selectedRunId=value.id;return value;
+      },
+      select: (id) => { this.state.selectedRunId=id; },
+      setAuto: (id,value) => { this.state.runs.find(run=>run.id===id).autoAdvance=value; },
+      pause: (id) => { this.state.runs.find(run=>run.id===id).autoAdvance=false; },
+      launch: () => launch(false), advance: () => launch(true),
+    };
+    this.workspace = {
+      sync: async () => {}, close: () => {}, autoOpenToken: () => ({request:ACTION}),
+      autoOpen: async () => { this.opened=true; },
+      open: async (_run,options) => {
+        await wait();
+        if (ACTION === 'workspace-error') throw Error('fixture work tab rejected');
+        if (ACTION === 'stage' && options.stageId !== 'plan') throw Error('stage assignment was lost');
+        this.opened=true;
+      },
+    };
+    this.backView = new WorkspaceView();
+    this.backView.init({view:'workspace',role:'toolbar',spaceId:'team-space',managerTabId:'manager-tab'},cx);
+    this.backView.isCheck=false;
+    this.backView.error='back has not resumed';
+  }
+  invoke(cx) {
+    if (ACTION === 'start') this.start(cx);
+    else if (ACTION === 'launch') this.launch(this.currentRun(),cx);
+    else if (ACTION === 'advance') this.advance(this.currentRun(),cx);
+    else if (ACTION === 'back') this.backView.back(cx);
+    else if (ACTION === 'expired-control') {
+      // This deliberately broken control proves that the gate really outlives
+      // the click scope. The production actions must not behave like it.
+      this.perform(cx,'waiting',async () => { await wait();cx.notify(); });
+    } else this.openWorkspace(this.currentRun(),cx,ACTION === 'stage' ? {stageId:'plan'} : {});
+  }
+  render() {
+    return v_flex().w(700).h(400)
+      .child(this.button(theme(),'native-team-click','Run native callback',(cx)=>this.invoke(cx)))
+      .child(div().child('error='+(this.error || 'none')))
+      .child(div().child('workspaceError='+(this.workspaceError || 'none')))
+      .child(div().child('backError='+(this.backView.error || 'none')))
+      .child(div().child('busy='+(this.busy || 'idle')))
+      .child(div().child('armed='+this.armed))
+      .child(div().child('opened='+this.opened));
+  }
+}
+"#;
+        std::fs::write(staged.0.join("main.js"), source.replace("__ACTION__", &serde_json::to_string(action).unwrap())).unwrap();
+        let mut values = fixture(false, Value::Null, updates("current", "current"));
+        values.insert("checking".into(), json!(true));
+        values.insert("spaces".into(), json!([{"id":"team-space","mod":"team","machine":null,
+            "tabs":[{"id":"manager-tab","managed":true,"manager":true}]}]));
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let waits = Rc::new(Cell::new(0));
+        let (release, blocked) = async_channel::bounded::<()>(1);
+        let waiter = blocked.clone();
+        let observed = waits.clone();
+        let gate = HostModule::new("team-click-fixture").async_function("wait", move |_| {
+            observed.set(observed.get() + 1);
+            let waiter = waiter.clone();
+            Ok(async move {
+                waiter.recv().await.map_err(|error| HostError::new(error.to_string()))?;
+                Ok(HostValue::Null)
+            })
+        });
+        let observed = waits.clone();
+        let herdr = module(values, calls.clone()).async_function("command", move |args| {
+            assert_eq!(args.string(0)?, "tab.select");
+            assert_eq!(args.get(1).map(from_host), Some(json!({"id":"manager-tab"})));
+            observed.set(observed.get() + 1);
+            let waiter = blocked.clone();
+            Ok(async move {
+                waiter.recv().await.map_err(|error| HostError::new(error.to_string()))?;
+                Ok(HostValue::Null)
+            })
+        });
+        gpui_shell::policy::set_default(Policy::new().with_host_module(herdr).unwrap().with_host_module(gate).unwrap());
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let window = cx.add_window(|window, cx| RootedView(runtime.try_load(&staged.0, window, cx).unwrap()));
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let view: gpui::Entity<gpui_shell::ScriptView> = window.root(&mut visual).unwrap()
+            .read_with(&visual, |root, cx| root.0.read(cx).content().clone().downcast().unwrap());
+        let position = point(px(20.), px(16.));
+        visual.simulate_mouse_move(position, None, Modifiers::default());
+        visual.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        visual.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+        visual.run_until_parked();
+        assert_eq!(waits.get(), 1, "{action}: the real click must reach exactly one deferred host call");
+        // Resolve only after GPUI has returned from the click and the task has
+        // suspended. Promise.resolve alone would not prove that scope boundary.
+        release.try_send(()).unwrap();
+        visual.run_until_parked();
+        let tree = visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            view.read(cx).snapshot().map(gpui_shell::RenderSnapshot::debug_tree).unwrap_or_default()
+        });
+        assert!(tree.contains("busy=idle"), "{action}: {tree}");
+        if action == "expired-control" {
+            assert!(tree.contains("cx is no longer valid"), "the native gate did not expire the captured click cx: {tree}");
+            assert!(tree.contains("armed=false"), "{tree}");
+        } else {
+            assert!(tree.contains("error=none"), "{action}: {tree}");
+            assert!(!tree.contains("cx is no longer valid"), "{action}: {tree}");
+            assert!(tree.contains("armed=true"), "{action}: {tree}");
+            if action == "workspace-error" {
+                assert!(tree.contains("workspaceError=fixture work tab rejected"), "{tree}");
+            } else if action == "back" {
+                assert!(tree.contains("backError=none"), "{tree}");
+            } else {
+                assert!(tree.contains("workspaceError=none") && tree.contains("opened=true"), "{action}: {tree}");
+            }
+        }
+        assert_eq!(waits.get(), 1, "{action}: no duplicate launch or retry");
+        assert!(calls.borrow().unexpected.is_empty(), "{action}: {:?}", calls.borrow().unexpected);
+        assert!(calls.borrow().effects.is_empty(), "{action}: no user processes or files may be changed");
+        visual.update(|window, _| window.remove_window());
+        visual.run_until_parked();
+    }
+}
+
 #[gpui::test]
 fn a_mod_hears_a_pinch_only_over_its_element(cx: &mut TestAppContext) {
     use gpui::{AppContext as _, Modifiers, PinchEvent, TouchPhase, VisualTestContext, point, px};

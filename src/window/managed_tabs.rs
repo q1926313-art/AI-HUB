@@ -213,7 +213,14 @@ struct Adopt {
 
 fn replace_layout(model: &mut Model, live: &HashMap<String, Value>, chrome: &Node, id: &str, value: Value, expected: &Value, adopt: Option<&Value>, mod_exists: impl Fn(&str) -> bool) -> Result<Value, String> {
     let tab = model.tab(id).ok_or_else(|| format!("no tab {id:?}"))?;
-    if &json!(tab.root) != expected { return Err("tab.layout changed; read it again before saving".into()); }
+    // The JS bridge returns integral f32 values (e.g. gap: 8.0) as JSON
+    // integers. Compare the same lossless canonical form used by layout files;
+    // fractions, large integers, and every structural change still differ.
+    let mut current = json!(tab.root);
+    let mut expected = expected.clone();
+    crate::layout_sync::normalize(&mut current);
+    crate::layout_sync::normalize(&mut expected);
+    if current != expected { return Err("tab.layout changed; read it again before saving".into()); }
     let target_space = model.space_of(id).unwrap();
     if target_space.machine.is_some() { return Err("tab.layout currently supports local Spaces only".into()); }
     if value.to_string().len() > crate::mod_files::LIMIT as usize { return Err("tab.layout exceeds 1 MiB".into()); }
@@ -431,6 +438,57 @@ mod tests {
         let proofs = json!([{"terminal":"t1","labels":{"run":"r1"}},{"terminal":"missing","labels":{"run":"r1"}}]);
         assert!(set(&mut model, composition(), &expected, Some(&proofs)).is_err());
         assert_eq!(crate::mirror::Document::capture(&model, None), before);
+    }
+
+    #[test]
+    fn javascript_layout_roundtrip_preserves_compare_and_swap() {
+        let mut model = setup();
+        let expected = json!(model.tab("work").unwrap().root);
+        let mut layout = composition();
+        layout["gap"] = json!(8);
+        layout["children"][0]["size"] = json!({"weight":65});
+        layout["children"][0]["min"] = json!(160);
+        layout["children"][1]["size"] = json!({"weight":35.25});
+        layout["children"][1]["content"]["props"] = json!({"ratio":1.5});
+        set(&mut model, layout, &expected, Some(&proof())).unwrap();
+
+        let native = json!(model.tab("work").unwrap().root);
+        let javascript = crate::mods::from_host(&crate::mods::to_host(&native));
+        assert_ne!(native, javascript, "the real host bridge changes integral float representation");
+        assert_eq!(javascript["gap"], 8);
+        assert_eq!(javascript["children"][1]["size"]["weight"], 35.25);
+        let mut updated = javascript.clone();
+        updated["gap"] = json!(9.5);
+        let saved = set(&mut model, updated, &javascript, None).unwrap();
+        let read_again = crate::mods::from_host(&crate::mods::to_host(&saved["layout"]));
+        set(&mut model, read_again.clone(), &read_again, None).unwrap();
+        let before = crate::mirror::Document::capture(&model, None);
+        assert!(set(&mut model, javascript.clone(), &javascript, None).unwrap_err().contains("changed"));
+        assert_eq!(crate::mirror::Document::capture(&model, None), before);
+    }
+
+    #[test]
+    fn layout_cas_rejects_fraction_large_integer_and_archive_changes() {
+        let mut model = setup();
+        let expected = json!(model.tab("work").unwrap().root);
+        let mut layout = composition();
+        layout["gap"] = json!(8.25);
+        layout["children"][1]["content"]["props"] = json!({"revision":9007199254740992u64});
+        set(&mut model, layout, &expected, Some(&proof())).unwrap();
+        let current = json!(model.tab("work").unwrap().root);
+        let before = crate::mirror::Document::capture(&model, None);
+        for expected in [
+            { let mut value = current.clone(); value["gap"] = json!(8.5); value },
+            { let mut value = current.clone(); value["children"][1]["content"]["props"]["revision"] = json!(9007199254740993u64); value },
+        ] {
+            assert!(set(&mut model, current.clone(), &expected, None).unwrap_err().contains("changed"));
+            assert_eq!(crate::mirror::Document::capture(&model, None), before);
+        }
+        model.tab_mut("work").unwrap().rest.insert(OWNER.into(), json!("board"));
+        assert!(archive_terminal(&mut model, "late", "owned", Some("work")));
+        let with_archive = crate::mirror::Document::capture(&model, None);
+        assert!(set(&mut model, current.clone(), &current, None).unwrap_err().contains("changed"));
+        assert_eq!(crate::mirror::Document::capture(&model, None), with_archive);
     }
 
     #[test]

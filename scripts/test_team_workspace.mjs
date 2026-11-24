@@ -329,23 +329,132 @@ test("a terminal end restores a placeholder in the same work tab while other ter
   assert.ok(h.roots.has(placement.tabId));
 });
 
-test("a concurrent native layout change fails CAS safely and the next sync preserves its terminal", async () => {
+test("one sync recovers a native CAS conflict using fresh bindings and preserves the existing terminal", async () => {
   const h = harness(), current = fixture(), workspace = createWorkspace(h.host);
-  const tab = await workspace.open(current); h.setLive([launched(current, "plan", "t-plan")]);
+  const tab = await workspace.open(current), terminal = launched(current, "plan", "t-plan");
+  current.stages[0].terminal = null;
+  const snapshot = clone(current), writes = h.writes().length, selects = h.count("tab.select");
   let collided = false;
   h.controls.beforeCommand = async (name, args) => {
     if (name === "tab.layout" && args.layout && !collided) {
       collided = true;
       h.roots.get(tab).children.push({ id: "concurrent-archive", type: "column", hidden: true, children: [{ id: "pracing", type: "block", content: { terminal: "t-racing" } }] });
+      h.setLive([terminal]);
+    }
+  };
+  assert.equal(await workspace.sync(current), tab);
+  assert.equal(h.writes().length, writes + 2, "the same request rereads and rebuilds after its first conflict");
+  assert.deepEqual(views(h.roots.get(tab)).filter((view) => view.hidden).map((view) => view.terminal), ["t-racing"]);
+  assert.deepEqual(views(h.roots.get(tab)).filter((view) => !view.hidden).map((view) => view.terminal), ["t-plan"]);
+  assert.deepEqual(h.writes().at(-1).args.adopt, [{ terminal: "t-plan", labels: terminal.labels }]);
+  assert.deepEqual(current, snapshot, "finding the current attempt does not alter its identity or create another attempt");
+  assert.equal(h.count("tab.new"), 1); assert.equal(h.count("tab.select"), selects);
+});
+
+test("repeated native conflicts stop after three writes without replacing the tab or losing archived work", async () => {
+  const h = harness(), current = fixture(), workspace = createWorkspace(h.host);
+  const tab = await workspace.open(current); h.setLive([launched(current, "plan", "t-plan")]);
+  const writes = h.writes().length, selects = h.count("tab.select");
+  let conflicts = 0;
+  h.controls.beforeCommand = async (name, args) => {
+    if (name === "tab.layout" && args.layout) {
+      const index = ++conflicts;
+      h.roots.get(tab).children.push({ id: "racing-archive-" + index, type: "column", hidden: true,
+        children: [{ id: "pracing-" + index, type: "block", content: { terminal: "t-racing-" + index } }] });
     }
   };
   await assert.rejects(workspace.sync(current), /tab.layout changed/);
-  assert.deepEqual(addresses(h.roots.get(tab)), ["t-racing"]);
+  assert.equal(conflicts, 3); assert.equal(h.writes().length, writes + 3);
+  assert.deepEqual(addresses(h.roots.get(tab)), ["t-racing-1", "t-racing-2", "t-racing-3"]);
+  assert.equal(h.count("tab.new"), 1); assert.equal(h.count("tab.select"), selects);
+  assert.equal(h.data.get(WORKSPACE_KEY).tabId, tab);
+});
+
+test("a close observed after a conflict stops retries without recreating or focusing the work tab", async () => {
+  for (const target of ["work", "manager"]) {
+    const h = harness(), current = fixture(), workspace = createWorkspace(h.host);
+    const tab = await workspace.open(current), token = workspace.autoOpenToken();
+    h.setLive([launched(current, "plan", "t-plan")]);
+    const writes = h.writes().length, selects = h.count("tab.select");
+    h.controls.beforeCommand = async (name, args) => {
+      if (name === "tab.layout" && args.layout) {
+        h.closeTab(target === "work" ? tab : placement.tabId);
+        throw new Error("herdr.command: tab.layout changed; read it again before saving");
+      }
+    };
+    assert.equal(await workspace.open(current, { stageId: "plan" }), null);
+    assert.equal(h.writes().length, writes + 1, "a closed target is not retried");
+    await workspace.sync(current); await workspace.autoOpen(current, token);
+    assert.equal(h.count("tab.new"), 1); assert.equal(h.count("tab.select"), selects);
+    assert.equal(h.count("pane.focus"), 0);
+  }
+});
+
+test("a new workspace owner observed after a conflict is not overwritten by the old request", async () => {
+  const h = harness(), current = fixture(), workspace = createWorkspace(h.host);
+  const tab = await workspace.open(current); h.setLive([launched(current, "plan", "t-plan")]);
+  const writes = h.writes().length, selects = h.count("tab.select");
+  let replacement;
+  h.controls.beforeCommand = async (name, args) => {
+    if (name === "tab.layout" && args.layout) {
+      const prior = h.data.get(WORKSPACE_KEY);
+      replacement = { ...prior, owner: "replacement-owner", generation: prior.generation + 1, revision: prior.revision + 1 };
+      h.data.set(WORKSPACE_KEY, clone(replacement));
+      throw new Error("tab.layout changed; read it again before saving");
+    }
+  };
+  assert.equal(await workspace.open(current), null);
+  assert.deepEqual(h.data.get(WORKSPACE_KEY), replacement);
+  assert.equal(h.writes().length, writes + 1); assert.equal(h.count("tab.new"), 1);
+  assert.equal(h.count("tab.select"), selects); assert.ok(h.roots.has(tab));
+});
+
+test("a foreign panel discovered by the fresh CAS read is preserved instead of overwritten", async () => {
+  const h = harness(), current = fixture(), workspace = createWorkspace(h.host);
+  const tab = await workspace.open(current); h.setLive([launched(current, "plan", "t-plan")]);
+  const writes = h.writes().length;
+  let afterEdit;
+  h.controls.beforeCommand = async (name, args) => {
+    if (name === "tab.layout" && args.layout && !afterEdit) {
+      h.roots.get(tab).children.push({ id: "racing-notes", type: "block", content: { mod: "personal-notes", props: { file: "/notes.md" } } });
+      afterEdit = clone(h.roots.get(tab));
+    }
+  };
+  await assert.rejects(workspace.sync(current), /다른 패널/);
+  assert.deepEqual(h.roots.get(tab), afterEdit);
+  assert.equal(h.writes().length, writes + 1, "revalidation stops before a second write");
   assert.equal(h.count("tab.new"), 1);
-  await workspace.sync(current);
-  assert.deepEqual(views(h.roots.get(tab)).filter((view) => view.hidden).map((view) => view.terminal), ["t-racing"]);
-  assert.deepEqual(views(h.roots.get(tab)).filter((view) => !view.hidden).map((view) => view.terminal), ["t-plan"]);
-  assert.equal(h.count("tab.new"), 1);
+});
+
+test("an explicit stage open focuses the current PTY only after its CAS retry succeeds", async () => {
+  const h = harness(), current = fixture(), workspace = createWorkspace(h.host);
+  const tab = await workspace.open(current); h.setLive([launched(current, "plan", "t-plan")]);
+  const writes = h.writes().length, selects = h.count("tab.select");
+  let collided = false;
+  h.controls.beforeCommand = async (name, args) => {
+    if (name === "tab.layout" && args.layout && !collided) {
+      collided = true;
+      h.roots.get(tab).children.push({ id: "racing-archive", type: "column", hidden: true,
+        children: [{ id: "pracing", type: "block", content: { terminal: "t-racing" } }] });
+      throw new Error("herdr.command: tab.layout changed; read it again before saving");
+    }
+  };
+  assert.equal(await workspace.open(current, { stageId: "plan" }), tab);
+  assert.equal(h.writes().length, writes + 2); assert.equal(h.count("tab.new"), 1);
+  assert.equal(h.count("tab.select"), selects + 1); assert.equal(h.count("pane.focus"), 1);
+  assert.deepEqual(h.calls.at(-1), { name: "pane.focus", args: { terminal: "t-plan" } });
+});
+
+test("ordinary layout validation failures are reported without a CAS retry", async () => {
+  const h = harness(), current = fixture(), workspace = createWorkspace(h.host);
+  const tab = await workspace.open(current); h.setLive([launched(current, "plan", "t-plan")]);
+  const before = clone(h.roots.get(tab)), writes = h.writes().length, layoutCalls = h.count("tab.layout");
+  h.controls.beforeCommand = async (name, args) => {
+    if (name === "tab.layout" && args.layout) throw new Error("terminal no longer matches its adoption labels");
+  };
+  await assert.rejects(workspace.sync(current), /no longer matches its adoption labels/);
+  assert.equal(h.writes().length, writes + 1); assert.equal(h.count("tab.layout"), layoutCalls + 2);
+  assert.deepEqual(h.roots.get(tab), before); assert.equal(h.count("tab.new"), 1);
 });
 
 test("a foreign panel added to the work tab is preserved and blocks automatic replacement", async () => {

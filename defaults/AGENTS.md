@@ -623,6 +623,8 @@ The main ones:
 - `tab.layout {id}` reads one explicit tab as `{space, tab, layout}`.
   `tab.layout {id, layout, expected, adopt?}` replaces a local tab's row/column
   composition only when `expected` still matches its complete previous layout.
+  Small whole-number floats and integers compare equally across the JavaScript
+  bridge; actual value, structure, and ownership changes still conflict.
   Terminal and mod blocks are supported; recursive tab content and chrome-only
   constructs are rejected. Preserve existing terminals, using a hidden archive
   when they are no longer shown. An incoming terminal needs an explicit
@@ -1055,6 +1057,10 @@ choosing another run, editing a report, or closing management disarms it.
 The native work tab uses inline assignment controls. Ended terminals become
 placeholders while other slots and the Space remain. Earlier live roles/attempts
 stay in a hidden archive in that work tab, preventing unsolicited re-adoption.
+If a terminal arrival changes the layout mid-update, the viewer rereads that same
+tab and rebuilds from its latest contents, with at most three write attempts.
+It does not bypass a conflict, replace a foreign panel, or create a tab on retry.
+Opening an existing run's work tab never requires relaunching the current AI.
 Closing the work tab or Space stops its terminals, including archived ones.
 App restart may restore existing tabs but never arms automatic execution.
 The view's `ai-hub.team.workspace.v1` preferences are display state, not permission

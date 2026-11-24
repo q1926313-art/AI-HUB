@@ -175,6 +175,10 @@ and Space intact. Earlier live roles/attempts are archived in the same work tab.
 Native tab/Space close stops its terminals; closing management also pauses future
 handoffs. Restarting the app or choosing another run never arms execution.
 Workspace preferences never authorize new AI work or recreate a user-closed tab.
+If an older viewer reports `tab.layout changed` or `cx is no longer valid`, update
+to 0.1.23 or later and open the existing run's work tab. Do not restart an already
+running attempt to repair its display. Layout races reread the same tab and
+preserve newly arrived terminals; genuine conflicts still stop the update.
 
 The panel supports manual handoff (default), optional automatic progression,
 report review/editing, terminal inspection, and Markdown export. Reported test

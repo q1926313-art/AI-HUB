@@ -4,6 +4,10 @@
 The real app/JS engine loads each state. This is a materialization check, not a
 complete-frame screenshot or a test of a provider's coding agent. Logs and the
 element descriptions remain in target/team-ui even when a scenario fails.
+
+This mode does not dispatch clicks or resume async event handlers. Those paths
+are covered by the real GPUI test team_clicks_resume_with_the_spawned_context
+in src/mods/render_tests.rs; CI runs it before these description fixtures.
 """
 
 from __future__ import annotations

@@ -7259,8 +7259,26 @@ export default class Board extends View {
         const result = await command("tab.layout", {id: p.tab});
         const work = await command("tab.new", {space: p.space, mod: "board", props: {view: "work"}, focus: false});
         const published = spaces().find(space => space.id === p.space)?.tabs.find(tab => tab.id === work.tab);
+        const initial = await command("tab.layout", {id: work.tab});
+        const layout = {id: work.tab, type: "row", gap: 8, children: [
+          {id: work.pane, type: "block", size: {weight: 65}, min: 160, content: {mod: "board", props: {view: "work"}}},
+          {id: `${work.tab}-side`, type: "block", size: {weight: 35.25}, content: {mod: "board", props: {view: "side"}}}
+        ]};
+        await command("tab.layout", {id: work.tab, layout, expected: initial.layout});
+        // Native f32 geometry becomes JS numbers and returns as integral JSON
+        // where possible. A second write must accept that unchanged snapshot.
+        const first = await command("tab.layout", {id: work.tab});
+        await command("tab.layout", {id: work.tab, layout: {...first.layout, gap: 9.5}, expected: first.layout});
+        const second = await command("tab.layout", {id: work.tab});
+        await command("tab.layout", {id: work.tab, layout: second.layout, expected: second.layout});
+        let staleRejected = false;
+        try { await command("tab.layout", {id: work.tab, layout: first.layout, expected: first.layout}); }
+        catch (error) { staleRejected = String(error).includes("changed"); }
+        const final = await command("tab.layout", {id: work.tab});
         setShared("managed-command-result", {tab: result.tab, space: result.space, custom: p.custom, work: work.tab,
-          published: published?.managed === true && published?.manager === false});
+          published: published?.managed === true && published?.manager === false,
+          roundtrip: final.layout.gap === 9.5 && final.layout.children[0].size.weight === 65
+            && final.layout.children[1].size.weight === 35.25, staleRejected});
         try { await command("tab.layout", {id: "missing-tab"}); }
         catch (error) { setShared("managed-command-error", String(error)); }
       } catch (error) { setShared("managed-command-unexpected", String(error)); }
@@ -7287,6 +7305,8 @@ export default class Board extends View {
         assert_eq!(observed["tab"], opened["tab"]);
         assert_eq!(observed["custom"], 17);
         assert_eq!(observed["published"], true, "tab.new publishes its managed snapshot before its Promise resolves");
+        assert_eq!(observed["roundtrip"], true, "real JS commands can read and rewrite integer/fractional native geometry");
+        assert_eq!(observed["staleRejected"], true, "a real intervening layout change still rejects an outdated JS snapshot");
         assert!(crate::mods::shared("managed-command-error").and_then(|v| v.as_str().map(str::to_owned)).is_some_and(|error| error.contains("no tab")));
         view.update_in(cx, |this, window, cx| {
             let pane = opened["pane"].as_str().unwrap();

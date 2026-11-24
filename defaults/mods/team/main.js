@@ -477,7 +477,9 @@ export default class Team extends View {
     this.notice = null;
     cx.notify();
     cx.spawn(async (cx) => {
-      try { await action(); }
+      // Click contexts end with their callback. Actions which await work must
+      // receive this task's AsyncContext instead of retaining the click's cx.
+      try { await action(cx); }
       catch (error) { this.error = message(error); this.disarm(); }
       finally {
         this.busy = null;
@@ -532,7 +534,7 @@ export default class Team extends View {
       folder: this.folderInput.value().trim(), spaceId: this.projectSpaceId,
       machine: null, autoAdvance: this.newAuto,
     };
-    this.perform(cx, "첫 역할을 시작하는 중…", async () => {
+    this.perform(cx, "첫 역할을 시작하는 중…", async (taskCx) => {
       const current = this.runtime.create(input);
       // Browsing New no longer pauses the existing run. Starting a different
       // run does: an in-flight automatic handoff must see that saved stop.
@@ -547,7 +549,7 @@ export default class Team extends View {
       this.armedRunId = current.id;
       const viewerToken = this.workspaceAutoToken();
       await this.runtime.launch(current.id);
-      await this.showStartedWorkspace(cx, viewerToken);
+      await this.showStartedWorkspace(taskCx, viewerToken);
     });
   }
 
@@ -584,7 +586,7 @@ export default class Team extends View {
   }
 
   launch(current, cx) {
-    this.perform(cx, "역할을 시작하는 중…", async () => {
+    this.perform(cx, "역할을 시작하는 중…", async (taskCx) => {
       this.armed = true;
       this.armedRunId = current.id;
       this.selectedStageId = activeStage(current)?.id ?? null;
@@ -592,12 +594,12 @@ export default class Team extends View {
       this.reportDirty = false;
       const viewerToken = this.workspaceAutoToken();
       await this.runtime.launch(current.id);
-      await this.showStartedWorkspace(cx, viewerToken);
+      await this.showStartedWorkspace(taskCx, viewerToken);
     });
   }
 
   advance(current, cx) {
-    this.perform(cx, "인수인계를 연결하는 중…", async () => {
+    this.perform(cx, "인수인계를 연결하는 중…", async (taskCx) => {
       this.armed = true;
       this.armedRunId = current.id;
       const viewerToken = this.workspaceAutoToken();
@@ -605,7 +607,7 @@ export default class Team extends View {
       this.selectedStageId = null;
       this.reportEditing = false;
       this.reportDirty = false;
-      await this.showStartedWorkspace(cx, viewerToken);
+      await this.showStartedWorkspace(taskCx, viewerToken);
     });
   }
 
