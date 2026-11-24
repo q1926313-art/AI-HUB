@@ -2435,10 +2435,10 @@ index 075c200..2263760 100755
    *) say "Add $bin to your PATH to use herdr-app and hc from a terminal." ;;
 diff --git a/docs/UPSTREAM.md b/docs/UPSTREAM.md
 new file mode 100644
-index 0000000..4654a1e
+index 0000000..0c521c6
 --- /dev/null
 +++ b/docs/UPSTREAM.md
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,56 @@
 +# AI Hub 원본 및 변경 범위
 +
 +AI Hub는 Herdr 데스크톱 앱의 소스를 가져와 이름과 배포 구성을 조정한 독립 프로젝트입니다.
@@ -2456,7 +2456,8 @@ index 0000000..4654a1e
 +## 보존 원칙
 +
 +기준 커밋의 앱·터미널·작업 공간·탭·분할 화면·에이전트 관리·SSH 연결·모드 구현을 가져옵니다.
-+원본 커밋 이력과 AI-HUB의 기존 커밋 이력을 병합하여 출처와 이전 작업을 유지합니다.
++원본 기준 커밋을 기록하고 AI-HUB의 기존 커밋 이력을 이어서 출처와 이전 작업을 유지합니다.
++원본의 전체 변경 이력은 위 원본 저장소에서 확인할 수 있습니다.
 +`LICENSE`, `THIRD-PARTY-NOTICES`, `licenses/`, vendored 의존성 및 `.gitmodules`를 유지합니다.
 +`vendor/ghostty`는 원본과 동일한 커밋을 가리키는 Git 하위 모듈입니다.
 +
