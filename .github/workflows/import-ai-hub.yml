@@ -1,0 +1,60 @@
+# One-time, reviewed AI Hub import; removed by the completed import commit.
+name: Import AI Hub source
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/import-ai-hub.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: write
+concurrency:
+  group: ai-hub-initial-import
+  cancel-in-progress: false
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Import pinned upstream and reviewed changes
+        env:
+          EXPECTED_TREE: e37399ed38127b90f13095d19e8151c262e72135
+          EXPECTED_PATCH_SHA256: a6587558f46a72735382259aa6bcb03a4af5ead40fc9e2c96f6dd1e406acac1a
+        run: |
+          set -euo pipefail
+          echo "$EXPECTED_PATCH_SHA256  .ai-hub-bootstrap/import.patch" | sha256sum -c -
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/herdrdev/herdr-app.git
+          git fetch --no-tags upstream 2d1464e02ddad5484eaaf9a5b59b594e3930aeba
+          git merge --allow-unrelated-histories --no-commit --no-ff FETCH_HEAD
+          git apply --index .ai-hub-bootstrap/import.patch
+          git rm -- .ai-hub-bootstrap/import.patch .github/workflows/import-ai-hub.yml
+          git diff --cached --check
+          actual_tree=$(git write-tree)
+          test "$actual_tree" = "$EXPECTED_TREE"
+          git commit -m 'feat: import herdr desktop as ai hub with independent windows distribution'
+          git push origin HEAD:main
+          echo "Imported source: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Verified tree: $actual_tree" >> "$GITHUB_STEP_SUMMARY"
+      - name: Start platform checks and Windows package build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for workflow in ci.yml release.yml; do
+            dispatched=false
+            for attempt in 1 2 3 4 5 6; do
+              if gh workflow run "$workflow" --ref main --repo "$GITHUB_REPOSITORY"; then
+                dispatched=true
+                break
+              fi
+              sleep 5
+            done
+            test "$dispatched" = true
+          done
