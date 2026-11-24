@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Modified for AI Hub: reuse downloaded builds and capture through the app CLI.
 # A throwaway Herdr app on its own core, home and display, so changes get tried
 # without touching the real one. The display is a headless Weston with
 # Xwayland: nothing shows on the desktop, frames never stall, and screenshots
@@ -68,7 +69,10 @@ stop_window() {
 }
 
 start_window() {
-  (cd "$here/.." && cargo build)
+  if [[ -z ${HERDR_APP_BIN:-} ]]; then
+    (cd "$here/.." && cargo build)
+  fi
+  [[ -x $bin ]] || { echo "app executable not found: $bin" >&2; return 1; }
   start_display
   mkdir -p "$HERDR_APP_HOME" "$root/bin"
   # Opening a link would reach the real browser: log it instead (`scripts/sandbox opened`).
@@ -101,9 +105,7 @@ case ${1:-} in
   do | status) exec "$bin" "$@" ;;
   shot)
     out=${2:-$root/shot.png}
-    import -display "$DISPLAY" -window Herdr "$root/full.png"
-    magick "$root/full.png" -resize '1100x>' "$out"
-    echo "$out"
+    exec "$bin" shot "$out"
     ;;
   move | click | drag | type | key | hold | release | sequence) input "$@" ;;
   log) cat "$root/app.log" ;;

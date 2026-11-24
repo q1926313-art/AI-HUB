@@ -10,7 +10,7 @@ publish = false
 
 [package]
 name = "herdr-app"
-version = "0.1.17-aihub.1" # AI Hub modification (2026-11-24): independent fork release.
+version = "0.1.17-aihub.2" # AI Hub modification (2026-11-24): independent fork release.
 edition.workspace = true
 license.workspace = true
 publish.workspace = true

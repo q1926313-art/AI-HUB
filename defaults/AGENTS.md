@@ -974,6 +974,44 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   space's repo, branch, ahead/behind and uncommitted changes). Shipped mods
   are AI Hub's; duplicate with `mod.clone` before editing.
 
+### AI team workflow (`team`)
+
+AI Hub's shipped `team` mod opens from the sidebar's **AI 팀** or the command
+palette, or `herdr-app do mod.open --name team`. It runs an ordered local team:
+plan (Claude Code), implement (Codex), review (Claude Code), verify (Gemini CLI).
+The person can choose an installed agent, edit instructions, and disable roles.
+Role settings are copied into each new run; editing defaults does not rewrite an
+existing run. Each CLI needs its own installation and login. Read-only role
+instructions are prompts, not an OS sandbox.
+
+Only local absolute project folders are supported by this version. Roles share
+that folder and run one after another. The mod launches terminals with `hc run`
+and exact `aihub.run`, `aihub.stage`, `aihub.attempt`, `herdr.space`, `herdr.tab`
+labels. Keep the program's configured arguments and permission prompts. Do not
+add permission-bypass flags. Never retry an uncertain launch blindly: locate the
+original terminal by its labels before deciding what happened.
+
+`shared.json` key `ai-hub.team.v1` holds profiles and up to 20 recent runs.
+Prompts and reports live at `<project>/.ai-hub/team/<runId>/<stageId>-<attempt>.md`
+and `.json`. Reports must match the current run, stage and attempt and contain
+`status` (`completed` or `blocked`), `summary`, `changes`, `tests`, `issues`, and
+`next`. Test results are `pass`, `fail`, or `not_run`, reported by the agent;
+the UI does not certify that a claimed test ran. The folder is excluded through
+Git's local `info/exclude` when possible, without editing tracked `.gitignore`.
+Export writes `handoff.md`; archive writes `run.json` and removes only the recent
+entry for a completed or never-started run.
+
+Manual handoff is the default. Automatic progression requires a valid current
+report, completed work observed from core status (not startup idle), and no
+reported failed tests or issues. Authentication/permission waits, abnormal exits,
+lost terminals, and malformed reports do not count as success. Stop automatic
+progression separately from interrupting the current AI. Reopening a record does
+not arm it; starting or advancing it does. Closing or leaving the panel and
+editing a report disarm it. Keep `model.js` pure and the runtime host-injected;
+`node --test scripts/test_team.mjs scripts/test_team_runtime.mjs` checks their
+contracts. `checking()` must render the team UI without spawning workers,
+writing data, or installing timers.
+
 ### Terminal link handlers
 
 In `mod.json`, declare what the mod can open:

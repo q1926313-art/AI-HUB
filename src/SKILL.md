@@ -1,5 +1,5 @@
-<!-- AI Hub modification (2026-11-24): names and configuration paths; based on Herdr. -->
 # herdr-app: drive the person's window
+<!-- AI Hub modification (2026-11-24): names and configuration paths; based on Herdr. -->
 
 AI Hub shows spaces, tabs and panes. herdr-core (`hc`) runs their terminals
 and keeps them alive when the window closes. Use `herdr-app` only to change
@@ -130,6 +130,28 @@ Closing a pane, tab or space ends the terminals in it. Core ends their dependent
 children and keeps children started with `--outlive-parent` running. `terminal.kill`
 also follows the sub-agent tree, stopping at any child with a pane or a
 `herdr.space` label. Core still applies parent-lifetime rules to every exit.
+
+## AI team roles
+
+Open AI Hub's **AI 팀** from the sidebar or command palette, or with
+`herdr-app do mod.open --name team`. The person sets a local project, goal, and
+role profiles. Defaults are Claude Code for planning/review, Codex for
+implementation, and Gemini CLI for verification. Roles run sequentially, with
+structured reports passed to the next role. Each CLI needs installation/login.
+Read-only role instructions are prompts, not filesystem enforcement.
+
+The panel supports manual handoff (default), optional automatic progression,
+report review/editing, terminal inspection, and Markdown export. Reported test
+results are the agent's claims. Automatic handoff requires both a valid current
+report and observed completion; startup idle is insufficient. Input waits,
+failed tests, reported issues, or abnormal exits stop automatic progression.
+Pausing automatic progression leaves the current AI running; interrupt is a
+separate action. Reopening a record does not restart automation.
+
+Reports are in `<project>/.ai-hub/team/<runId>/`; profile/recent-run state uses
+shared mod key `ai-hub.team.v1`. The installed `AGENTS.md` describes the contract.
+Do not manufacture completion reports, change run/stage/attempt identifiers, or
+silently restart an uncertain launch. Open the role's terminal to investigate.
 
 ## Customize layouts, keys, or mods
 
