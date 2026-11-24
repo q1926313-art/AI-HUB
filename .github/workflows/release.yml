@@ -1,0 +1,143 @@
+# Modified for AI Hub: own Windows artifacts and GitHub Releases only.
+# main/manual runs build downloadable artifacts. A v<version> tag publishes
+# after the preserved platform CI passes for that exact commit.
+name: AI Hub Windows build and release
+run-name: ${{ github.ref_type == 'tag' && format('AI Hub release {0}', github.ref_name) || format('AI Hub Windows build {0}', github.ref_name) }}
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-hub-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_TOOLCHAIN: 1.95.0
+  ZIG_VERSION: 0.16.0
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  windows-package:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Restore build cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: &cache-paths |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ai-hub-release-v1-windows-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'vendor/**', 'crates/**', '.github/workflows/release.yml') }}
+          restore-keys: ai-hub-release-v1-windows-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-
+      - name: Windows build dependencies
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_ENV -Value 'LIBCLANG_PATH=C:\Program Files\LLVM\bin'
+      - name: Keep unchanged sources fresh
+        run: scripts/ci-sources restore
+      - name: Build and pack AI Hub
+        run: scripts/package
+      - name: Check executable startup
+        run: ./target/release/herdr-app.exe --version
+      - name: Prepare ZIP, installers, checksums and update manifest
+        run: |
+          args=()
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then args+=(--tag "$GITHUB_REF_NAME"); fi
+          python scripts/prepare_release.py --repository "$GITHUB_REPOSITORY" "${args[@]}"
+      - name: Note the sources the cache was built from
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        run: scripts/ci-sources record
+      - name: Save build cache
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: *cache-paths
+          key: ai-hub-release-v1-windows-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'vendor/**', 'crates/**', '.github/workflows/release.yml') }}
+      - name: Upload Windows download bundle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: AI-Hub-windows-x86_64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  ci-passed:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require a commit from main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Wait for platform CI on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          while :; do
+            result=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&per_page=20" --jq '[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch")][0] | "\(.status) \(.conclusion) \(.id)"') || result="api unavailable"
+            echo "CI for $GITHUB_SHA: $result"
+            case "$result" in
+              "completed success "*) exit 0 ;;
+              "completed cancelled "*) echo "The CI run was cancelled; rerun it to continue this release." ;;
+              completed*) exit 1 ;;
+            esac
+            sleep 30
+          done
+
+  publish:
+    needs: [windows-package, ci-passed]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: AI-Hub-windows-x86_64
+          path: dist
+      - name: Publish complete GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Stage assets in a draft first, so the update feed never sees a
+          # partially uploaded release. Re-running a published tag is a no-op.
+          if state=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [[ "$state" == false ]]; then
+              echo "Release $GITHUB_REF_NAME is already published; preserving its assets."
+              exit 0
+            fi
+            gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "AI Hub $GITHUB_REF_NAME" --generate-notes
+          fi
+          # Fork revision suffixes are intentional stable app versions. Keep
+          # releases/latest/download usable instead of inferring prerelease.
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest
