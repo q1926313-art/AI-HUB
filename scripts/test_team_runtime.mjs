@@ -253,6 +253,90 @@ test("automatic mode requires a current report and an observed completed turn", 
   assert.equal(h.terminals.size, 2);
 });
 
+test("a task completed before its first get advances once, including a recovered late reply", async () => {
+  for (const lateReply of [false, true]) {
+    const h = harness(), run = h.create({ autoAdvance: true });
+    h.controls.run = (terminal, list) => {
+      terminal.status = { state: "idle" }; terminal.turn = 1;
+      list.set(terminal.address, terminal);
+      if (lateReply) throw new Error("late run response");
+      return okay(compactTerminal(terminal));
+    };
+    await h.runtime.launch(run.id);
+    assert.equal(h.stage(run.id).sawWorking, true);
+    assert.equal(h.stage(run.id).lastTurn, 1);
+    h.controls.run = null;
+    h.ready(run.id);
+    await h.runtime.refresh(run.id, { autoAdvance: true });
+    assert.equal(h.current(run.id).stages[0].status, "completed");
+    assert.equal(h.stage(run.id).id, "implement");
+    await h.runtime.refresh(run.id, { autoAdvance: true });
+    assert.equal(h.terminals.size, 2, "repeated polling neither duplicates the first task nor skips the next");
+  }
+});
+
+test("older saved running and ready attempts recover completed work even when lastTurn already equals one", async () => {
+  for (const savedStatus of ["running", "ready"]) {
+    const h = harness(), run = h.create({ autoAdvance: true });
+    const state = h.host.shared(STATE_KEY), saved = state.runs[0], stage = saved.stages[0];
+    saved.status = "running";
+    Object.assign(stage, { status: "running", attempt: 1, launchKey: run.id + "-plan-1", terminal: "t37",
+      startedAt: 10000, terminalState: "idle", sawWorking: false, lastTurn: 1 });
+    h.data.set(STATE_KEY, state);
+    const report = h.ready(run.id);
+    if (savedStatus === "ready") { stage.status = "ready"; stage.report = report; }
+    h.terminals.set("t37", { address: "t37", labels: { "aihub.run": run.id, "aihub.stage": "plan", "aihub.attempt": "1" },
+      state: "live", status: { state: "idle" }, turn: 1, exit_code: null, reason: null });
+    const reopened = createRuntime(h.host);
+    await reopened.refresh(run.id);
+    assert.equal(h.stage(run.id).status, "ready");
+    assert.equal(h.stage(run.id).sawWorking, true);
+    assert.equal(h.terminals.size, 1, "reopening and inspecting a saved run does not arm it");
+    await reopened.refresh(run.id, { autoAdvance: true });
+    assert.equal(h.current(run.id).stages[0].status, "completed", savedStatus);
+    assert.equal(h.current(run.id).stages[0].terminal, "t37", "the previous attempt identity remains intact");
+    assert.equal(h.stage(run.id).id, "implement", savedStatus);
+    assert.equal(h.effects.filter((effect) => effect[0] === "hc" && effect[1][0] === "run").length, 1, "only the next role launches");
+  }
+});
+
+test("all four automatic roles wait for report writers to finish without disarming or duplicating work", async () => {
+  const h = harness(), run = h.create({ autoAdvance: true });
+  await h.runtime.launch(run.id);
+  for (const [index, role] of ["plan", "implement", "review", "verify"].entries()) {
+    const stage = h.stage(run.id), terminal = h.terminals.get(stage.terminal);
+    assert.equal(stage.id, role);
+    terminal.status.state = "working";
+    h.ready(run.id);
+    await h.runtime.refresh(run.id, { autoAdvance: true });
+    assert.equal(h.stage(run.id).status, "ready");
+    assert.equal(h.current(run.id).autoAdvance, true, "a report written during the final turn keeps automatic mode enabled");
+    assert.equal(h.terminals.size, index + 1, "no next role starts while the report writer is working");
+    await assert.rejects(h.runtime.advance(run.id), /작업 중/, "manual handoff still refuses a working AI");
+    terminal.status.state = "idle"; terminal.turn = 1;
+    await h.runtime.refresh(run.id, { autoAdvance: true });
+    assert.equal(h.current(run.id).stages[index].status, "completed");
+  }
+  assert.equal(h.current(run.id).status, "completed");
+  assert.equal(h.current(run.id).autoAdvance, false);
+  assert.equal(h.effects.filter((effect) => effect[0] === "hc" && effect[1][0] === "run").length, 4);
+});
+
+test("a completed turn ending in approval waiting still pauses automatic handoff", async () => {
+  const h = harness(), run = h.create({ autoAdvance: true });
+  h.controls.run = (terminal, list) => {
+    terminal.status = { state: "blocked", kind: "permission" }; terminal.turn = 1;
+    list.set(terminal.address, terminal);
+    return okay(compactTerminal(terminal));
+  };
+  await h.runtime.launch(run.id); h.ready(run.id);
+  await h.runtime.refresh(run.id, { autoAdvance: true });
+  assert.equal(h.current(run.id).autoAdvance, false);
+  assert.equal(h.stage(run.id).id, "plan");
+  assert.equal(h.terminals.size, 1);
+  assert.equal(h.effects.some((effect) => effect[0] === "hc" && ["send", "keys"].includes(effect[1][0])), false);
+});
+
 test("reopening a team does not arm automatic execution", async () => {
   const h = harness(), run = h.create({ autoAdvance: true });
   await h.runtime.launch(run.id); h.ready(run.id);

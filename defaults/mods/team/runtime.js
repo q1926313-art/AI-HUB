@@ -9,6 +9,10 @@ const copy = (value) => JSON.parse(JSON.stringify(value));
 const safeId = (id) => typeof id === "string" && /^[a-z0-9][a-z0-9_-]{0,95}$/.test(id);
 const psQuote = (word) => "'" + word.replace(/['\u2018\u2019\u201a\u201b]/gu, "$&$&") + "'";
 const stateWord = (terminal) => typeof terminal?.status === "string" ? terminal.status : terminal?.status?.state;
+// Each attempt creates a new, label-verified terminal. Core turn starts at zero
+// and increases when status leaves working, so a positive first observation is
+// evidence of work even when a fast task finished before its run/get reply.
+const initialWork = (terminal) => stateWord(terminal) === "working" || (Number.isSafeInteger(terminal?.turn) && terminal.turn > 0);
 const textError = (error) => String(error?.message ?? error).replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").slice(0, 2000);
 const stripAnsi = (text) => String(text ?? "").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
 const modelId = (value) => typeof value === "string" && value.length <= 200 && /^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$/.test(value);
@@ -510,14 +514,14 @@ export function createRuntime(host) {
       // API record. Resolve its address before verifying attempt ownership.
       const started = json(await host.hc(args), "담당 AI 실행");
       const terminal = await terminalRecord(started?.address, run, stage);
-      patchStage(id, stage.id, { status: "running", terminal: terminal.address, terminalState: stateWord(terminal) || terminal.state || "unknown", lastTurn: terminal.turn ?? 0, sawWorking: stateWord(terminal) === "working" }, attempt);
+      patchStage(id, stage.id, { status: "running", terminal: terminal.address, terminalState: stateWord(terminal) || terminal.state || "unknown", lastTurn: terminal.turn ?? 0, sawWorking: initialWork(terminal) }, attempt);
       return find(id);
     } catch (error) {
       if (sent) {
         try {
           const terminal = await locate(find(id), find(id).stages.find((item) => item.id === stage.id));
           if (terminal) {
-            patchStage(id, stage.id, { status: "running", terminal: terminal.address, terminalState: stateWord(terminal) || terminal.state || "unknown", lastTurn: terminal.turn ?? 0, sawWorking: stateWord(terminal) === "working", error: "실행 응답을 다시 확인했습니다. " + textError(error), launchUncertain: false }, attempt);
+            patchStage(id, stage.id, { status: "running", terminal: terminal.address, terminalState: stateWord(terminal) || terminal.state || "unknown", lastTurn: terminal.turn ?? 0, sawWorking: initialWork(terminal), error: "실행 응답을 다시 확인했습니다. " + textError(error), launchUncertain: false }, attempt);
             return find(id);
           }
         } catch { /* The launch may still be in flight; absence is not proof of failure. */ }
@@ -570,6 +574,9 @@ export function createRuntime(host) {
     if (report.status !== "completed") throw new Error("이 역할이 막힌 이유를 해결한 뒤 완료 보고서를 준비해 주세요.");
     patchStage(id, stage.id, { report, reportError: null }, attempt);
     const word = stateWord(terminal);
+    // The final report can be written before the agent finishes its last turn.
+    // Automatic polling waits; rejecting here would disarm the owning view.
+    if (automatic && word === "working") return run;
     if (["working", "blocked", "error"].includes(word)) throw new Error("현재 담당 AI가 아직 작업 중이거나 입력을 기다립니다.");
     if (terminal.reason && !["exited"].includes(terminal.reason)) throw new Error("실행이 중단되거나 복구된 기록입니다. 담당자의 결과를 다시 확인해 주세요.");
     if (terminal.state === "finished" && terminal.exit_code !== 0) throw new Error("현재 담당자의 실행이 정상 종료되지 않았습니다.");
@@ -597,7 +604,10 @@ export function createRuntime(host) {
       }
       const word = stateWord(terminal);
       const terminalState = terminal.state === "finished" ? "finished:" + terminal.exit_code : (terminal.reason || word || "unknown");
-      const sawWorking = stage.sawWorking || word === "working" || Number(terminal.turn ?? 0) > Number(stage.lastTurn ?? 0);
+      // Older saved runs may already have copied a completed turn into lastTurn
+      // before recording sawWorking. Ownership is verified for this exact attempt,
+      // so its positive turn remains evidence even without another increment.
+      const sawWorking = stage.sawWorking || initialWork(terminal);
       const patch = { terminal: terminal.address, terminalState, sawWorking, lastTurn: terminal.turn ?? stage.lastTurn, launchUncertain: false, error: null };
       if (stage.status === "launching") patch.status = "running";
       patchStage(id, stage.id, patch, stage.attempt);
