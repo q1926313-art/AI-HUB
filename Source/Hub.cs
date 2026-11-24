@@ -233,7 +233,6 @@ sealed class Chat : Form
     {
         var button = (Button)sender;
         button.Enabled = false;
-        string staged = null;
         try
         {
             status.Text = "GitHub에서 업데이트 확인 중...";
@@ -244,24 +243,13 @@ sealed class Chat : Form
                 status.Text = "설치할 새 버전이 없습니다.";
                 return;
             }
-            if (MessageBox.Show(this, "버전 " + release.Version.ToString(3) + "을 설치하고 다시 시작할까요? 현재 대화 창이 닫힙니다.",
-                Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
-            {
-                status.Text = "업데이트를 취소했습니다.";
-                return;
-            }
-
-            status.Text = "업데이트 다운로드 및 검증 중...";
-            staged = await Task.Run(() => GitHubUpdate.Stage(release));
-            if (closing) return;
             if (busy)
             {
                 status.Text = "실행 중인 작업을 마친 뒤 업데이트를 다시 눌러 주세요.";
                 return;
             }
 
-            GitHubUpdate.StartInstaller(staged, release);
-            staged = null;
+            GitHubUpdate.StartInstaller(release);
             Close();
         }
         catch (Exception ex)
@@ -270,7 +258,6 @@ sealed class Chat : Form
         }
         finally
         {
-            if (staged != null) GitHubUpdate.Discard(staged);
             if (!closing) button.Enabled = true;
         }
     }
