@@ -9,7 +9,7 @@ const source = await readFile(new URL("../defaults/mods/team/model.js", import.m
 const {
   STATE_KEY, LIMITS, defaultProfiles, validateProfiles, createRun, readState,
   activeStage, nextStage, validateStart, updateStage, parseReport,
-  buildPrompt, reportMarkdown, handoffText,
+  buildPrompt, reportMarkdown, handoffText, newTaskProject, isHomeFolder,
 } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
 const optionsSource = await readFile(new URL("../defaults/mods/team/options.js", import.meta.url), "utf8");
 const { modelOptions, effortOptions, effortProblem } = await import(`data:text/javascript;base64,${Buffer.from(optionsSource).toString("base64")}`);
@@ -280,6 +280,86 @@ test("project paths support POSIX, Windows and Unicode without shell interpretat
     assert.throws(() => make({ folder }), /경로|제어|폴더/);
   }
   for (const id of ["../escape", "a/b", "..", "id\nnext"]) assert.throws(() => make({}, { id }), /ID/);
+});
+
+test("home comparison normalizes Windows case and separators without matching child projects", () => {
+  const home = "C:\\Users\\사용자";
+  for (const folder of [home, "c:/users/사용자", " C:/USERS/사용자/ ", "c:\\users\\사용자\\\\"])
+    assert.equal(isHomeFolder(folder, home), true, folder);
+  for (const folder of ["C:\\Users\\사용자\\project", "C:/Users/사용자-other", "C:/Users/other", "", null])
+    assert.equal(isHomeFolder(folder, home), false, String(folder));
+  assert.equal(isHomeFolder("\\\\SERVER\\Share\\User\\", "//server/share/user"), true);
+  assert.equal(isHomeFolder("/home/person/", "/home/person"), true);
+  assert.equal(isHomeFolder("/home/Person", "/home/person"), false, "POSIX case is preserved");
+  assert.equal(isHomeFolder("/home/person/project", "/home/person"), false);
+  assert.equal(isHomeFolder("", ""), false);
+});
+
+test("an embedded new-task form uses its actual Space and prefers the selected local run folder", () => {
+  const home = "C:\\Users\\사용자", project = "C:\\projects\\my-app";
+  const selectedRun = running(make({ folder: project, spaceId: "spteam", tabId: "tbmanager" }));
+  const input = {
+    home, placement: { spaceId: "spteam", tabId: "tbmanager" }, selectedRun,
+    spaces: [
+      { id: "spother", active: true, machine: null, folder: "C:\\Unrelated", tabs: [{ id: "tbother" }] },
+      { id: "spteam", active: false, machine: null, folder: home, tabs: [{ id: "tbmanager" }, { id: "tbwork" }] },
+    ],
+    panes: [
+      { tab: "tbother", focused: true, cwd: "C:\\Unrelated" },
+      { tab: "tbmanager", focused: false, cwd: null },
+      { tab: "tbwork", focused: false, cwd: home },
+    ],
+  };
+  const before = JSON.stringify(input);
+  const freeze = (value) => {
+    if (value && typeof value === "object") { Object.values(value).forEach(freeze); Object.freeze(value); }
+    return value;
+  };
+  freeze(input);
+  assert.deepEqual(newTaskProject(input), { folder: project, spaceId: "spteam", remote: false });
+  assert.equal(JSON.stringify(input), before, "initial defaults do not rewrite runs, attempts, terminals or native state");
+  assert.deepEqual(newTaskProject({ ...input, placement: null }), { folder: "C:\\Unrelated", spaceId: "spother", remote: false }, "legacy non-embedded entry keeps the active local project's precedence");
+  const withoutHistory = { ...input, selectedRun: null, panes: [], spaces: input.spaces.map((space) => space.id === "spteam" ? { ...space, folder: project } : space) };
+  assert.deepEqual(newTaskProject(withoutHistory), { folder: project, spaceId: "spteam", remote: false });
+  assert.deepEqual(newTaskProject({ ...input, spaces: [input.spaces[0]] }), { folder: project, spaceId: null, remote: false }, "a local saved run can seed the form before its Space snapshot appears");
+  assert.deepEqual(newTaskProject({ ...withoutHistory, spaces: [input.spaces[0]] }), { folder: "", spaceId: null, remote: false }, "a missing placement does not borrow the active unrelated Space");
+});
+
+test("automatic home defaults become empty even for a saved home run while child projects remain available", () => {
+  const home = "C:\\Users\\사용자", project = home + "\\project";
+  const base = { home, placement: { spaceId: "spteam" }, spaces: [
+    { id: "spteam", active: true, machine: null, folder: "c:/USERS/사용자/", tabs: [{ id: "tbwork" }] },
+  ], panes: [] };
+  assert.equal(newTaskProject(base).folder, "", "home Space fallback is not a project selection");
+  assert.equal(newTaskProject({ ...base, panes: [{ tab: "tbwork", focused: true, cwd: home }] }).folder, "");
+  assert.equal(newTaskProject({ ...base, selectedRun: make({ folder: "c:/users/사용자/" }), panes: [{ tab: "tbwork", focused: true, cwd: project }] }).folder, "", "a saved home run does not fall through to an incidental terminal");
+  assert.equal(newTaskProject({ ...base, selectedRun: make({ folder: project }) }).folder, project);
+  assert.equal(newTaskProject({ ...base, panes: [{ tab: "tbwork", focused: true, cwd: project }] }).folder, project);
+});
+
+test("new-task folder defaults retain remote provenance protection for active, placed and legacy runs", () => {
+  const local = { id: "spteam", active: false, machine: null, folder: "/local/project", tabs: [{ id: "tbmanager" }] };
+  const remote = { id: "server/sp1", active: true, machine: "server", folder: "/remote/project", tabs: [{ id: "server/tb1" }] };
+  const input = { spaces: [local, remote], panes: [{ tab: "server/tb1", focused: true, cwd: "/remote/private" }], home: "/home/person" };
+  assert.deepEqual(newTaskProject(input), { folder: "", spaceId: null, remote: true });
+  assert.deepEqual(newTaskProject({ ...input, placement: { spaceId: local.id } }), { folder: "/local/project", spaceId: local.id, remote: false }, "active remote focus cannot redirect a local embedded manager");
+  assert.deepEqual(newTaskProject({ ...input, placement: { spaceId: remote.id }, selectedRun: make() }), { folder: "", spaceId: null, remote: true });
+  const legacy = make({ folder: "/remote/private", spaceId: remote.id });
+  const restored = readState(state(legacy)).runs[0];
+  assert.equal(restored.machine, null, "legacy records can retain qualified space IDs without machine metadata");
+  for (const selectedRun of [restored, { ...make(), folder: "/remote/private", machine: "server" }, { ...make(), folder: "/remote/private", tabId: "server/tb1" }])
+    assert.equal(newTaskProject({ ...input, placement: { spaceId: local.id }, selectedRun }).folder, "/local/project");
+});
+
+test("explicitly choosing home stays valid and preparing a new form leaves previous home work intact", () => {
+  const home = "C:\\Users\\사용자", previous = running(make({ folder: home }));
+  const before = JSON.stringify(previous);
+  assert.equal(newTaskProject({ selectedRun: previous, home, placement: { spaceId: "spteam" } }).folder, "");
+  assert.equal(JSON.stringify(previous), before);
+  const manual = make({ folder: home }, { id: "explicit-home-project" });
+  assert.equal(manual.folder, home); assert.equal(isHomeFolder(manual.folder, home), true);
+  assert.deepEqual(readState(state(previous)).runs[0], previous);
+  assert.equal(previous.stages[0].terminal, "t1"); assert.equal(previous.stages[0].attempt, 1);
 });
 
 test("goal, instructions and persisted state have bounded sizes", () => {

@@ -158,6 +158,15 @@ model. A catalog entry is not proof of account access, and a provider alias does
 not promise a permanently pinned model version. Profile changes affect new runs;
 existing assignments stay as recorded.
 
+New-task folder defaults in the embedded manager prefer the selected saved
+project and resolve its own Space. Home-folder fallbacks leave the input empty;
+explicit home selection shows that Claude's trust lasts only for that session.
+Existing runs keep their recorded folders. On Windows, launch and model queries
+enter the selected project after PowerShell profiles run; an inaccessible folder
+stops the CLI launch. An already running terminal is not relocated by updating.
+If a run saved the wrong project, confirm its AI has stopped before creating a
+replacement with the correct folder. Trust prompts remain for the user to answer.
+
 Claude and Codex also have selectable model presets; supported reasoning levels
 come from documented exact models or the installed tool's model catalog. Blank
 effort means the tool's default. Unsupported explicit choices must fail clearly,

@@ -2,6 +2,15 @@
 
 <!-- AI Hub fork modification, 2026-11-24. Earlier entries below are retained upstream history. -->
 
+## [0.1.24] - 2026-11-24
+<!-- spotlight windows -->
+
+### Fixed
+
+- **AI 팀의 새 작업에서 프로젝트 폴더를 유지합니다.** 선택한 기존 작업의 프로젝트를 우선 사용하고, 홈 폴더가 자동으로 입력되던 경우에는 직접 프로젝트를 선택하도록 했습니다.
+- Windows 시작 설정이 폴더를 바꿔도 선택한 프로젝트에서 AI와 모델 조회를 시작합니다. 프로젝트로 이동할 수 없으면 실행을 멈추고 오류를 표시합니다.
+- 홈 폴더를 직접 선택하면 Claude의 신뢰 승인이 현재 세션에만 적용된다는 안내를 표시합니다.
+
 ## [0.1.23] - 2026-11-24
 <!-- spotlight windows -->
 

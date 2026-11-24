@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRuntime, reportFile, launcherArguments, agentArguments, parseModelList, parseCodexModelCache, parseOpenCodeModelMetadata, capturedArguments } from "../defaults/mods/team/runtime.js";
@@ -576,6 +576,43 @@ test("PowerShell launcher doubles all recognized single quote variants and rejec
   assert.throws(() => launcherArguments("windows", ["tool\nmalicious"], "goal"), /실행 명령/);
 });
 
+test("Windows launches and model probes restore the selected cwd after profile startup", async () => {
+  const h = harness(); h.host.window = () => ({ platform: "windows" });
+  const folder = "C:\\AI\\한글 [literal] & O'Brien";
+  const location = "Microsoft.PowerShell.Management\\Set-Location -LiteralPath 'C:\\AI\\한글 [literal] & O''Brien' -ErrorAction Stop;";
+  h.controls.configured.claude = ["claude", "--verbose"];
+  const run = h.create({ folder });
+  await h.runtime.launch(run.id);
+  const core = h.effects.find((effect) => effect[0] === "hc" && effect[1][0] === "run")[1];
+  assert.equal(core[core.indexOf("--cwd") + 1], folder, "the core and post-profile launcher receive the same project");
+  const launched = h.terminals.get("t1").argv;
+  assert.equal(launched.includes("-NoProfile"), false, "profile-defined PATH, functions and auth remain available");
+  assert.ok(launched.at(-1).includes(location));
+  assert.ok(launched.at(-1).indexOf(location) < launched.at(-1).indexOf("& 'claude' '--verbose'"), "cwd is restored before the configured command");
+  await h.runtime.listModels({ folder });
+  const probes = h.effects.filter((effect) => effect[0] === "exec" && effect[1] === "pwsh.exe" && effect[2].at(-1).includes("'opencode'"));
+  assert.ok(probes.length > 0);
+  for (const probe of probes) {
+    assert.equal(probe[3].cwd, folder);
+    assert.equal(probe[2].includes("-NoProfile"), false);
+    assert.ok(probe[2].at(-1).includes(location), "captured queries use the selected project after profiles too");
+    assert.ok(probe[2].at(-1).indexOf(location) < probe[2].at(-1).indexOf("& 'opencode'"));
+  }
+});
+
+test("Windows cwd helpers reject invalid paths and retain omitted-cwd and Unix behavior", () => {
+  const capture = (cwd) => capturedArguments(["tool"], "powershell.exe", cwd);
+  const launch = (cwd) => launcherArguments("windows", ["tool"], undefined, "powershell.exe", {}, cwd);
+  for (const cwd of [null, "", "relative", "C:relative", "C:\\work\\..\\other", "C:\\bad\nfolder", "C:\\bad\u007ffolder", "C:\\" + "x".repeat(LIMITS.path)]) {
+    assert.throws(() => capture(cwd), /프로젝트|폴더|경로/);
+    assert.throws(() => launch(cwd), /프로젝트|폴더|경로/);
+  }
+  assert.doesNotMatch(capture().at(-1), /Set-Location/, "omitting cwd preserves the caller's original shell behavior");
+  assert.doesNotMatch(launch().at(-1), /Set-Location/);
+  assert.deepEqual(launcherArguments("linux", ["tool"], undefined, "/bin/sh", {}, "/explicit/project"),
+    launcherArguments("linux", ["tool"], undefined, "/bin/sh"), "non-Windows launcher behavior is unchanged");
+});
+
 test("real Unix launcher preserves literal arguments without executing their contents", { skip: process.platform === "win32" }, () => {
   const directory = mkdtempSync(join(tmpdir(), "aihub-argv-"));
   try {
@@ -1039,6 +1076,69 @@ test("real Windows PowerShell shims preserve model/effort argv, exit codes, and 
       const lines = launched.stdout.trim().split(/\r?\n/);
       assert.deepEqual(JSON.parse(lines[0]), { args: ["--effort", "xhigh"], effort: "xhigh" });
       assert.equal(lines[1], "RESTORED:low");
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("real Windows launch and query restore literal cwd after startup cd and stop on missing directories", { skip: process.platform !== "win32" }, () => {
+  const directory = mkdtempSync(join(tmpdir(), "aihub-cwd-"));
+  try {
+    const project = join(directory, "한글 [literal] & O'Brien");
+    const startupFolder = join(directory, "profile-folder");
+    mkdirSync(project); mkdirSync(startupFolder);
+    writeFileSync(join(directory, "capture-cwd.cjs"), [
+      "require('node:fs').writeFileSync(process.env.AI_HUB_TEST_CALLED, 'called');",
+      "if (process.argv.includes('--fail')) process.exit(7);",
+      // ASCII output keeps PS5's console encoding separate from Unicode cwd/argv.
+      "console.log(Buffer.from(JSON.stringify({cwd:process.cwd(),args:process.argv.slice(2),profile:process.env.AI_HUB_TEST_PROFILE,effort:process.env.CLAUDE_CODE_EFFORT_LEVEL}),'utf8').toString('base64'));",
+    ].join("\n") + "\n");
+    const shim = join(directory, "opencode.cmd");
+    writeFileSync(shim, '@echo off\r\n"' + process.execPath + '" "%~dp0capture-cwd.cjs" %*\r\n');
+    const quote = (word) => "'" + word.replace(/'/g, "''") + "'";
+    // Simulate a profile's startup cd without editing any actual profile.
+    const startup = "Microsoft.PowerShell.Management\\Set-Location -LiteralPath " + quote(startupFolder)
+      + " -ErrorAction Stop; $env:AI_HUB_TEST_PROFILE = 'profile-kept'; ";
+    const expected = ["models", "literal $() & text", "--model", goModel + "#high", "-c", "model_reasoning_effort=ultra"];
+    for (const shell of ["powershell.exe", "pwsh.exe"]) for (const mode of ["query", "launch"]) {
+      const marker = join(directory, shell + "-" + mode + ".called");
+      const invoke = (cwd, extra = []) => {
+        rmSync(marker, { force: true });
+        const argv = [shim, ...expected, ...extra];
+        const args = mode === "query"
+          ? capturedArguments(argv, shell, cwd)
+          : launcherArguments("windows", argv, undefined, shell, { CLAUDE_CODE_EFFORT_LEVEL: "xhigh" }, cwd);
+        assert.equal(args.includes("-NoProfile"), false);
+        assert.equal(args.includes("-ExecutionPolicy"), false);
+        const suffix = mode === "launch" ? "; [Console]::WriteLine('RESTORED:' + $env:CLAUDE_CODE_EFFORT_LEVEL); exit 0" : "";
+        // The production command body is unchanged; only close the successful
+        // interactive shell in this bounded test instead of leaving it open.
+        const flags = args.slice(1, -1).map((flag) => flag === "-NoExit" ? "-NonInteractive" : flag);
+        return spawnSync(args[0], [...flags, startup + args.at(-1) + suffix], {
+          cwd: project, encoding: "utf8", timeout: 15000,
+          env: { ...process.env, CLAUDE_CODE_EFFORT_LEVEL: "low", AI_HUB_TEST_CALLED: marker },
+        });
+      };
+      const drifted = invoke(undefined);
+      assert.equal(drifted.status, 0, shell + " " + mode + " control: " + (drifted.stderr || String(drifted.error)));
+      const old = JSON.parse(Buffer.from(drifted.stdout.trim().split(/\r?\n/)[0], "base64").toString("utf8"));
+      assert.equal(realpathSync(old.cwd).toLowerCase(), realpathSync(startupFolder).toLowerCase(),
+        "omitted-cwd control must reproduce the profile's directory drift");
+      const launched = invoke(project);
+      assert.equal(launched.status, 0, shell + " " + mode + ": " + (launched.stderr || String(launched.error)));
+      assert.equal(existsSync(marker), true);
+      const lines = launched.stdout.trim().split(/\r?\n/);
+      const observed = JSON.parse(Buffer.from(lines[0], "base64").toString("utf8"));
+      assert.equal(realpathSync(observed.cwd).toLowerCase(), realpathSync(project).toLowerCase(), shell + " " + mode);
+      assert.deepEqual(observed.args, expected);
+      assert.equal(observed.profile, "profile-kept", "the startup environment survives");
+      assert.equal(observed.effort, mode === "launch" ? "xhigh" : "low");
+      if (mode === "launch") assert.equal(lines[1], "RESTORED:low");
+      const failed = invoke(project, ["--fail"]);
+      assert.equal(failed.status, 7, shell + " " + mode + ": " + (failed.stderr || String(failed.error)));
+      assert.equal(existsSync(marker), true, "the CLI's own nonzero exit is preserved");
+      const missing = invoke(join(project, "missing"));
+      assert.equal(missing.status, 1, shell + " " + mode + ": " + (missing.stderr || String(missing.error)));
+      assert.equal(existsSync(marker), false, "a failed cwd change must not start the CLI in the profile's folder");
     }
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });

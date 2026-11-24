@@ -1037,6 +1037,15 @@ and exact `aihub.run`, `aihub.stage`, `aihub.attempt`, `herdr.space`, `herdr.tab
 labels. Keep the program's configured arguments and permission prompts. Do not
 add permission-bypass flags. Never retry an uncertain launch blindly: locate the
 original terminal by its labels before deciding what happened.
+New-task folder defaults in the embedded manager come from its own Space and
+prefer the selected saved run's project over terminal or Space fallbacks. A home
+folder default is left empty so the person selects a project; explicit home
+selection remains possible with a note that Claude's home trust is session-only.
+This affects new-form initialization, never an existing run's folder or attempt.
+On Windows, launch and model-query commands restore the selected project with
+`Set-Location -LiteralPath` after PowerShell profiles run, and fail before invoking
+the CLI if that folder cannot be entered. Preserve profile settings and never
+write CLI trust state or answer a trust prompt automatically.
 The CLI's `run --json` and `ls --json` responses are compact records without labels;
 fetch each candidate with `get <address> --json` before verifying ownership.
 

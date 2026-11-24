@@ -74,6 +74,39 @@ function pathKey(value) {
   if (/^[A-Za-z]:\//.test(result) || result.startsWith("//")) result = result.toLowerCase();
   return result;
 }
+
+export function isHomeFolder(folder, home) {
+  const comparable = (value) => {
+    if (typeof value !== "string" || !value.trim()) return null;
+    let result = value.trim().replace(/\\/g, "/").replace(/\/+$/, "") || "/";
+    if (/^[A-Za-z]:(?:\/|$)/.test(result) || result.startsWith("//")) result = result.toLowerCase();
+    return result;
+  };
+  const target = comparable(folder), base = comparable(home);
+  return target !== null && base !== null && target === base;
+}
+
+// Used once when a new-task form is initialized. In an embedded manager, saved
+// local task folders take precedence over incidental terminal/Space defaults.
+// An automatic home choice becomes blank, but explicit home input stays valid.
+export function newTaskProject({ placement = null, selectedRun = null, spaces = [], panes = [], home = "" } = {}) {
+  const remoteId = (id) => typeof id === "string" && id.includes("/");
+  const space = placement
+    ? spaces.find((entry) => entry.id === placement.spaceId)
+    : spaces.find((entry) => entry.active);
+  if (space?.machine || remoteId(space?.id) || remoteId(placement?.spaceId))
+    return { folder: "", spaceId: null, remote: true };
+  const localFolder = (value) => {
+    try { return path(value, "프로젝트 폴더"); } catch (_) { return ""; }
+  };
+  const saved = placement && selectedRun?.machine == null && !remoteId(selectedRun?.spaceId) && !remoteId(selectedRun?.tabId)
+    ? localFolder(selectedRun?.folder) : "";
+  const tabs = new Set(space?.tabs?.map((tab) => tab.id) ?? []);
+  const candidates = panes.filter((pane) => tabs.has(pane.tab) && !remoteId(pane.tab) && localFolder(pane.cwd));
+  const pane = candidates.find((entry) => entry.focused) ?? candidates[0];
+  const folder = saved || localFolder(pane?.cwd) || localFolder(space?.folder);
+  return { folder: isHomeFolder(folder, home) ? "" : folder, spaceId: space?.id ?? null, remote: false };
+}
 function agent(value) {
   if (typeof value !== "string" || value.length > 64 || !/^[A-Za-z0-9]/.test(value) || /[^A-Za-z0-9._-]/.test(value))
     throw new Error("에이전트: 설치된 프로그램의 식별자를 선택하세요.");

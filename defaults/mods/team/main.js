@@ -5,7 +5,7 @@ import {
   theme, spaces, panes, terminals, props, checking, closeOverlay, nextCommand, pickFolder,
   shared, setShared, hc, exec, run, command, knownAgents, readTextFile, writeTextFile, appHome, home, window,
 } from "herdr";
-import { defaultProfiles, readState, activeStage, nextStage } from "./model.js";
+import { defaultProfiles, readState, activeStage, nextStage, newTaskProject, isHomeFolder } from "./model.js";
 import { createRuntime } from "./runtime.js";
 import { modelOptions, effortOptions, effortProblem } from "./options.js";
 import { createWorkspace } from "./workspace.js";
@@ -29,16 +29,6 @@ const dateLabel = (value) => {
   const two = (n) => String(n).padStart(2, "0");
   return `${date.getFullYear()}.${two(date.getMonth() + 1)}.${two(date.getDate())} ${two(date.getHours())}:${two(date.getMinutes())}`;
 };
-
-// A remote space's cwd must never become a local launch folder by accident.
-function localProject() {
-  const space = spaces().find((entry) => entry.active);
-  if (!space || space.machine) return { folder: "", spaceId: null, remote: Boolean(space?.machine) };
-  const tabs = new Set(space.tabs.map((tab) => tab.id));
-  const candidates = panes().filter((pane) => tabs.has(pane.tab));
-  const pane = candidates.find((entry) => entry.focused && entry.cwd) ?? candidates.find((entry) => entry.cwd);
-  return { folder: pane?.cwd || space.folder || "", spaceId: space.id, remote: false };
-}
 
 export default class Team extends View {
   init(_props, cx) {
@@ -84,7 +74,10 @@ export default class Team extends View {
     this.width = 960;
     this.newAuto = false;
     this.handle = cx.focus_handle();
-    const project = this.isCheck ? { folder: "", spaceId: null, remote: false } : localProject();
+    this.userHome = this.isCheck ? "" : home();
+    const project = this.isCheck ? { folder: "", spaceId: null, remote: false } : newTaskProject({
+      placement: this.placement, selectedRun: this.currentRun(), spaces: spaces(), panes: panes(), home: this.userHome,
+    });
     this.projectSpaceId = this.placement?.spaceId ?? project.spaceId;
     this.remoteProject = project.remote;
     this.titleInput = InputState.new({ placeholder: "예: 로그인 오류 수정" });
@@ -736,6 +729,8 @@ export default class Team extends View {
       .child(v_flex().child(this.label(t, "로컬 프로젝트 폴더"))
         .child(h_flex().gap(8).items_center().child(div().flex_1().min_w(0).child(this.field(t, Input.new(this.folderInput)).h(38)))
           .child(this.button(t, "team-pick-folder", "폴더 선택", (cx) => this.pickProject(cx))))
+        .when(isHomeFolder(this.folderInput.value(), this.userHome), (element) => element.child(div().id("team-home-folder-hint").pt(6).text_size(11).text_color(t.muted)
+          .child("홈 폴더에서 실행하면 Claude의 폴더 신뢰는 현재 세션에만 적용됩니다.")))
         .when(this.remoteProject, (element) => element.child(div().pt(6).text_size(11).text_color(t.blocked).child("현재 공간은 원격입니다. 이 작업에 사용할 로컬 프로젝트 폴더를 선택해 주세요."))))
       .child(v_flex().gap(9)
         .child(h_flex().items_center().justify_between().child(this.label(t, "역할 · 모델 · 추론 강도"))

@@ -172,9 +172,18 @@ function openCodeConfiguration(argv) {
 // Windows' npm installations commonly expose a .cmd/.ps1 shim. PowerShell
 // resolves that same user command for probes and live launches, without eval
 // of model IDs or paths and without an interactive shell left behind.
-export function capturedArguments(argv, shell = "powershell.exe") {
+function powershellLocation(cwd) {
+  if (cwd === undefined) return "";
+  if (typeof cwd !== "string" || !cwd.trim() || cwd.length > LIMITS.path || /\u007f/.test(cwd)) throw new Error("프로젝트 폴더 경로가 올바르지 않습니다.");
+  runDirectory({ id: "cwd", folder: cwd });
+  // Profiles still supply PATH/functions/auth, but their cd must not redirect
+  // this explicit project. Failure stops before the configured CLI is called.
+  return "Microsoft.PowerShell.Management\\Set-Location -LiteralPath " + psQuote(cwd) + " -ErrorAction Stop; ";
+}
+
+export function capturedArguments(argv, shell = "powershell.exe", cwd) {
   if (!Array.isArray(argv) || !argv.length || argv.some((word) => typeof word !== "string" || !word || /[\u0000\r\n]/.test(word))) throw new Error("도구 조회 명령이 올바르지 않습니다.");
-  const line = "& " + argv.map(psQuote).join(" ");
+  const line = powershellLocation(cwd) + "& " + argv.map(psQuote).join(" ");
   return [shell, "-NoLogo", "-NonInteractive", "-Command", "$ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = 0; try { " + line + "; exit $LASTEXITCODE } catch { Write-Error $_; exit 1 }"];
 }
 
@@ -217,13 +226,13 @@ export function agentArguments(stage, configured, prompt, openCodeMode = "root",
 
 // Each word is a distinct argument. The user's task is read from a file, keeping
 // Windows' command line short and avoiding shell interpolation of task text.
-export function launcherArguments(platform, argv, prompt, shell, environment = {}) {
+export function launcherArguments(platform, argv, prompt, shell, environment = {}, cwd) {
   if (!Array.isArray(argv) || !argv.length || argv.length > 64 || argv.some((v) => typeof v !== "string" || !v || /[\u0000\r\n]/u.test(v))) throw new Error("AI 실행 명령이 올바르지 않습니다.");
   const variables = Object.entries(environment);
   if (variables.some(([key, value]) => !/^[A-Z_][A-Z0-9_]*$/.test(key) || typeof value !== "string" || /[\u0000\r\n]/.test(value))) throw new Error("AI 실행 환경 설정이 올바르지 않습니다.");
   let command = prompt === undefined ? [...argv] : [...argv, prompt];
   if (platform === "windows") {
-    const line = "& " + command.map(psQuote).join(" ");
+    const line = powershellLocation(cwd) + "& " + command.map(psQuote).join(" ");
     if (line.length > 24000) throw new Error("실행 명령이 너무 깁니다. 도구의 실행 설정을 줄여 주세요.");
     // Native CLI failures stay observable; a successful interactive session leaves a shell.
     const saved = variables.map(([key], i) => "$ai_hub_env_" + i + " = $env:" + key + "; ").join("");
@@ -386,7 +395,7 @@ export function createRuntime(host) {
   };
   const captureCli = async (command, args, options) => {
     if (host.window?.()?.platform !== "windows") return host.exec(command, args, options);
-    const argv = capturedArguments([command, ...args], await shellFor("windows"));
+    const argv = capturedArguments([command, ...args], await shellFor("windows"), options?.cwd);
     return host.exec(argv[0], argv.slice(1), options);
   };
   const openCodeMode = async (program, stage, folder, capability) => {
@@ -503,7 +512,7 @@ export function createRuntime(host) {
       const shortTask = "AI Hub 팀 작업입니다. 프로젝트 지침을 먼저 확인한 뒤 UTF-8 작업 지시서 " + JSON.stringify(briefPath) + "를 읽고 해당 역할만 수행하세요. 마지막에 지시서의 JSON 형식으로 인수인계 보고서를 " + JSON.stringify(reportPath) + "에 작성하세요. 기존 도구의 권한 정책을 유지하세요.";
       const command = agentArguments(stage, agent.run, shortTask, mode, capability);
       const environment = stage.agent === "claude" && stage.effort ? { CLAUDE_CODE_EFFORT_LEVEL: stage.effort } : {};
-      const argv = launcherArguments(platform, command, undefined, shell, environment);
+      const argv = launcherArguments(platform, command, undefined, shell, environment, run.folder);
       const tab = run.tabId || "aihub-" + run.id + "-" + stage.id + "-" + attempt;
       const space = run.spaceId || "aihub-" + run.id;
       const args = ["run", "--bg", "--json", "--keep", "--no-parent", "--no-notify", "--cwd", run.folder,
