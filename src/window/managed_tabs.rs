@@ -336,7 +336,12 @@ impl AppWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // The parent window imports gpui::test. Keep the built-in #[test]
+    // unshadowed here; glob-importing the parent recursively expands that macro.
+    use super::{MANAGER, OWNER, Registry, SpaceSpec, allows_adoption, archive_terminal, ensure_space, replace_layout};
+    use crate::{layout::{Axis, Content, Node}, model::{Model, Tab}};
+    use serde_json::{Value, json};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
 
     fn setup() -> Model {
         let mut model = Model::default();
