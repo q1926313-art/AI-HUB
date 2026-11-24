@@ -2,3 +2,6 @@
 /dist
 /.brain
 /AGENTS.local.md
+# AI Hub modification (2026-11-24): keep generated Python test files out of source.
+__pycache__/
+*.py[cod]
