@@ -142,7 +142,8 @@ also follows the sub-agent tree, stopping at any child with a pane or a
 
 Open AI Hub's **AI 팀** from the sidebar or command palette, or with
 `herdr-app do mod.open --name team`. The person sets a local project, goal, and
-role profiles. Defaults are Claude Code for planning/verification, OpenCode Go
+role profiles in its persistent **AI 팀 Space → 팀 관리** tab. Reopening selects
+that Space without creating an extra shell. Defaults are Claude Code for planning/verification, OpenCode Go
 DeepSeek V4.1 Flash (`opencode-go/deepseek-v4.1-flash`) for implementation, and
 Codex for review. Names, order, tools, models, reasoning effort, access instructions and role
 instructions are editable; the person can add/remove 1–8 roles. Roles run sequentially, with
@@ -163,14 +164,17 @@ effort means the tool's default. Unsupported explicit choices must fail clearly,
 not run with a substituted model or effort. UI labels describe requested settings;
 the actual resolved provider model is visible in the CLI where it reports one.
 
-Use **실시간 작업 화면** to watch the actual team terminals: Claude large on the
+Use **실시간 작업 탭 열기** to watch the actual team terminals in the same Space: Claude large on the
 left, Codex upper right, OpenCode lower right. Set the left width to 55/65/75% and
 choose each pane's tool or specific role. A tool follows its latest started role;
 future roles show waiting cards until their turn. The view creates no extra AI
-sessions and leaves execution with the Team controller behind it. Return through
-**팀 관리 · 보고서** for handoff and stop controls. If a terminal exits, the native
-viewer closes; reopen it from Team to see the remaining roles. Closing Team still
-pauses its automatic handoff. Workspace preferences never arm execution.
+sessions and leaves execution with the persistent management tab. Return through
+**팀 관리 · 보고서** for handoff and stop controls. Tab/Space switches and opening
+role settings keep automation alive. One terminal ending leaves the other slots
+and Space intact. Earlier live roles/attempts are archived in the same work tab.
+Native tab/Space close stops its terminals; closing management also pauses future
+handoffs. Restarting the app or choosing another run never arms execution.
+Workspace preferences never authorize new AI work or recreate a user-closed tab.
 
 The panel supports manual handoff (default), optional automatic progression,
 report review/editing, terminal inspection, and Markdown export. Reported test
@@ -186,6 +190,16 @@ Do not manufacture completion reports, change run/stage/attempt identifiers, or
 silently restart an uncertain launch. Open the role's terminal to investigate.
 Core CLI run/list responses omit ownership labels: inspect each candidate with
 `hc get <address> --json` before attaching or recovering an uncertain launch.
+
+For a mod-owned Space, `mod.json` can declare `space: {name, tab, props}`.
+Its stable management pane receives `embedded`, `space`, `tab`, and `pane`.
+Use `await command(name, args)` from `herdr` when a mod needs a checked command
+result; `run` remains a queued action without a result. `tab.layout {id}` reads
+one native tab. Replacing it requires `{id, layout, expected, adopt?}`, where
+`expected` is the complete latest root. Preserve prior terminals in a hidden
+archive, and explicitly prove incoming terminal ownership through matching
+labels. Rebinding must not launch/kill terminals, overwrite stale layouts, or
+modify unrelated user work. The full contract is in the installed guide.
 
 ## Customize layouts, keys, or mods
 

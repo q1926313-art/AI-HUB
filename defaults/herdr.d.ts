@@ -100,6 +100,21 @@ export function playSound(sound: string): null;
  */
 export function run(name: string, args?: Record<string, unknown>): null;
 
+/** AI Hub: await a window command and receive its native JSON result. Rejects
+ * validation/command errors and cancellation when the window is closing.
+ * Like `herdr-app do`, missing arguments are errors; it never opens a confirmation
+ * dialog. `run` remains the fire-and-forget, user-action API.
+ * `tab.layout {id}` returns {space, tab, layout}. To update, pass
+ * {id, layout, expected: previous.layout, adopt?: [{terminal, labels}]}.
+ * The visible root is a row/column with id === tab. Children are row/column or
+ * terminal/mod blocks; ids and terminals are unique. Context/agent/stack/floating
+ * blocks and window-only fields are rejected. Existing tab terminals must remain
+ * in the tree; keep retired attempts in a hidden archive. Every added terminal
+ * needs an explicit adopt proof matching its current live labels. Other panes and
+ * terminal lifetimes are preserved. A failed validation changes no tabs.
+ */
+export function command(name: string, args?: Record<string, unknown>): Promise<Record<string, any>>;
+
 export type Status = "working" | "blocked" | "done" | "idle";
 
 /** A named piece of work in a space: shared through that machine's core doc.
@@ -107,6 +122,10 @@ export type Status = "working" | "blocked" | "done" | "idle";
  * Selection, focus, zoom and settled state belong to this screen only. */
 export interface TabInfo {
   id: string;
+  /** A mod-owned composition tab; its own UI replaces the global pane frame. */
+  managed: boolean;
+  /** The stable management tab created by mod.json's `space` declaration. */
+  manager: boolean;
   /** Position in its space, from 1. */
   index: number;
   /** Its name, or its position ("2") when nobody named it. */
@@ -132,6 +151,8 @@ export interface TabInfo {
 
 export interface SpaceInfo {
   id: string;
+  /** Owning mod for a locally created mod.json `space`, never inferred from its name. */
+  mod?: string;
   index: number;
   /** Its name, or where its first terminal is now (repo, else folder, "~" at home)
    *  when nobody named it. */
@@ -494,6 +515,15 @@ export type HandleLink = (click: LinkClick) => "handled" | "pass" | Promise<"han
  *  A layout's terminal_menu mod gets {tab: "pane", target: {pane: string, terminal: string}, overlay: string}.
  *  Target names the clicked pane/terminal, not necessarily the focused one; pass it to actions.
  *  Close the popup with closeOverlay(props().overlay). */
+/** mod.json may declare `space: {name?: string, tab?: string, props?: object}`.
+ * `mod.open` then creates/reselects one owned local Space and its management tab,
+ * without spawning a shell. Its stable props include embedded: true and space,
+ * tab, pane ids; those reserved fields override manifest props. Other props stay.
+ * A mod tab created with the owning mod in that Space is a managed composition:
+ * incoming terminals are archived hidden until its layout places them. Closing
+ * tabs/Spaces keeps the ordinary close behavior; late launches do not recreate
+ * a closed managed location. A late process may still finish in the background.
+ */
 /** Size is not a prop: root div/h_flex/v_flex.on_size_change reports logical px.
  * The exported View may implement async close(cx) for bounded final cleanup. */
 export function props(): any;

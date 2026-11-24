@@ -17,7 +17,7 @@ const compactTerminal = (terminal) => ({ address: terminal.address, state: termi
   ...(terminal.reason ? { reason: terminal.reason } : {}), ...(terminal.exit_code == null ? {} : { exit_code: terminal.exit_code }) });
 let harnessSequence = 0;
 
-function harness() {
+function harness(placement) {
   const home = "/home/test/ai-hub-test-" + (++harnessSequence);
   const data = new Map(), files = new Map(), terminals = new Map(), effects = [];
   let clock = 10000, sequence = 0, idSequence = 0;
@@ -31,6 +31,7 @@ function harness() {
     codexHelp: "  -m, --model <MODEL>\n  -c, --config <key=value>\n",
   };
   const host = {
+    ...(placement === undefined ? {} : { placement }),
     shared(key) { return clone(data.get(key)); },
     setShared(key, value) { data.set(key, clone(value)); },
     now: () => ++clock,
@@ -115,6 +116,93 @@ function harness() {
   };
   return { runtime, host, controls, data, files, terminals, effects, create, current, stage, ready };
 }
+
+test("native placement keeps every role and retry in one manager tab without starting on create", async () => {
+  const placement = { spaceId: "spteam", tabId: "tbmanager" };
+  const h = harness(placement);
+  const profiles = defaultProfiles(); profiles[0].name = "내 계획 역할";
+  h.runtime.saveProfiles(profiles);
+  const run = h.create({ autoAdvance: true, spaceId: "spother", tabId: "tbother" });
+  assert.equal(run.spaceId, "spteam"); assert.equal(run.tabId, "tbmanager");
+  assert.equal(run.stages[0].roleName, "내 계획 역할");
+  h.runtime.select(run.id); h.runtime.getState();
+  assert.deepEqual(h.effects, [], "binding, creating and selecting do not execute a CLI or prepare a report");
+  placement.tabId = "tbchanged";
+  await h.runtime.launch(run.id);
+  await h.runtime.interrupt(run.id);
+  await h.runtime.launch(run.id);
+  assert.equal(h.stage(run.id).attempt, 2);
+  for (const role of ["plan", "implement", "review", "verify"]) {
+    assert.equal(h.stage(run.id).id, role);
+    h.ready(run.id); await h.runtime.collect(run.id); await h.runtime.advance(run.id);
+  }
+  assert.equal(h.current(run.id).status, "completed");
+  assert.equal(h.terminals.size, 5, "one retry plus four sequential roles");
+  assert.deepEqual([...new Set([...h.terminals.values()].map((terminal) => terminal.labels["herdr.space"]))], ["spteam"]);
+  assert.deepEqual([...new Set([...h.terminals.values()].map((terminal) => terminal.labels["herdr.tab"]))], ["tbmanager"]);
+  assert.deepEqual(h.runtime.getState().profiles, profiles, "placement does not replace custom role settings");
+});
+
+test("reopening an old run binds only its next launch and preserves the current report and identity", async () => {
+  const h = harness(), run = h.create({ autoAdvance: true });
+  await h.runtime.launch(run.id); h.ready(run.id); await h.runtime.collect(run.id);
+  const previous = clone(h.stage(run.id)), originalTerminal = clone(h.terminals.get(previous.terminal));
+  const stateBefore = clone(h.data.get(STATE_KEY)), effectsBefore = h.effects.length;
+  const manager = createRuntime({ ...h.host, placement: { spaceId: "spteam", tabId: "tbmanager" } });
+  manager.getState(); manager.select(run.id);
+  assert.deepEqual(h.data.get(STATE_KEY), stateBefore, "opening/selecting does not migrate a running record or grant execution");
+  assert.equal(h.effects.length, effectsBefore);
+  await assert.rejects(manager.launch(run.id), /실행할 다음 역할/);
+  assert.deepEqual(h.stage(run.id), previous, "a ready role is not restarted during rebinding");
+  await manager.advance(run.id);
+  const current = h.current(run.id), completed = current.stages[0];
+  assert.equal(current.spaceId, "spteam"); assert.equal(current.tabId, "tbmanager");
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.terminal, previous.terminal); assert.equal(completed.attempt, previous.attempt);
+  assert.deepEqual(completed.report, previous.report);
+  assert.deepEqual(h.terminals.get(previous.terminal), originalTerminal, "old terminal relocation belongs to the native workspace, not the runtime");
+  assert.equal(h.terminals.get(current.stages[1].terminal).labels["herdr.tab"], "tbmanager");
+  assert.deepEqual(current.stages.slice(2), run.stages.slice(2), "later role snapshots remain untouched");
+});
+
+test("reopening persisted placement without manager props reuses its tab while old runs keep legacy labels", async () => {
+  const h = harness({ spaceId: "spteam", tabId: "tbmanager" }), run = h.create();
+  const { placement: _, ...legacyHost } = h.host;
+  const reopened = createRuntime(legacyHost);
+  await reopened.launch(run.id);
+  assert.equal(h.terminals.get("t1").labels["herdr.tab"], "tbmanager");
+  const legacy = harness(), oldRun = legacy.create();
+  assert.equal(oldRun.tabId, null);
+  await legacy.runtime.launch(oldRun.id);
+  assert.equal(legacy.terminals.get("t1").labels["herdr.space"], oldRun.spaceId);
+  assert.equal(legacy.terminals.get("t1").labels["herdr.tab"], "aihub-" + oldRun.id + "-plan-1");
+});
+
+test("placement rejects remote or malformed destinations before any effects", () => {
+  const h = harness();
+  for (const placement of [false, [], {}, { spaceId: "spteam" }, { spaceId: "remote/sp1", tabId: "tb1" },
+    { spaceId: "sp1", tabId: "remote/tb1" }, { spaceId: "sp1", tabId: "tb1", machine: "remote" },
+    { spaceId: "sp1\n", tabId: "tb1" }, { spaceId: "sp1", tabId: "../tab" }, { spaceId: "sp1", tabId: "a".repeat(97) }])
+    assert.throws(() => createRuntime({ ...h.host, placement }), /이 컴퓨터/);
+  assert.deepEqual(h.effects, []); assert.equal(h.data.size, 0);
+});
+
+test("rebinding does not discard the previous attempt when retry preflight fails", async () => {
+  const h = harness(), run = h.create(); await h.runtime.launch(run.id); await h.runtime.interrupt(run.id);
+  const previous = clone(h.current(run.id));
+  const manager = createRuntime({ ...h.host, placement: { spaceId: "spteam", tabId: "tbmanager" } });
+  h.terminals.get("t1").status.state = "working";
+  await assert.rejects(manager.launch(run.id), /이전 시도의 AI가 아직 실행 중/);
+  assert.deepEqual(h.current(run.id), previous);
+  h.controls.get = () => ({ code: 1, stdout: "", stderr: "core offline" });
+  await assert.rejects(manager.launch(run.id), /core offline/);
+  assert.deepEqual(h.current(run.id), previous, "a failed preflight keeps the old placement and attempt identity");
+  h.controls.get = null; h.terminals.get("t1").status.state = "idle";
+  await manager.launch(run.id);
+  assert.equal(h.current(run.id).spaceId, "spteam"); assert.equal(h.current(run.id).tabId, "tbmanager");
+  assert.equal(h.stage(run.id).attempt, previous.stages[0].attempt + 1);
+  assert.equal(h.terminals.get("t2").labels["herdr.tab"], "tbmanager");
+});
 
 test("four roles execute in order and each receives the original goal and prior reports", async () => {
   const h = harness(), run = h.create();

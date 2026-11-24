@@ -438,6 +438,8 @@ fn scan_dir(root: &Path, prefix: &str, previous: &BTreeMap<String, Found>) -> BT
 /// What mods ask of the window.
 pub enum Request {
     Run { name: String, args: Value },
+    /// AI Hub: a mod may await the same checked result as `herdr-app do`.
+    Command { name: String, args: Value, reply: async_channel::Sender<Value> },
     OpenOverlay { id: String, spec: Value },
     CloseOverlay { id: String },
     /// The OS window's title; `None` restores the default.
@@ -1277,6 +1279,26 @@ fn module(inst: Instance, copy: u64) -> HostModule {
                 request(Request::Run { name, args });
             }
             Ok(HostValue::Null)
+        })
+        .async_function("command", |a| {
+            let name = a.string(0)?.to_owned();
+            let args = a.get(1).map(from_host).unwrap_or(Value::Null);
+            if let Some(command) = crate::commands::find(&name) {
+                crate::commands::validate_args(command, &args).map_err(HostError::new)?;
+            }
+            if FINAL_KILLS.with_borrow(|value| value.is_some()) || crate::window::QUITTING.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(HostError::new("the window is closing; commands cannot be awaited"));
+            }
+            let sender = request_sender().ok_or_else(|| HostError::new("no open window accepts commands"))?;
+            let (reply, result) = async_channel::bounded(1);
+            sender.try_send(Request::Command { name, args, reply }).map_err(|_| HostError::new("the window is no longer accepting commands"))?;
+            Ok(async move {
+                let value = result.recv().await.map_err(|_| HostError::new("the window closed before the command finished"))?;
+                if let Some(error) = value.get("error").and_then(Value::as_str) {
+                    return Err(HostError::new(error));
+                }
+                Ok(to_host(&value))
+            })
         })
         .function("spaces", reader(reads.clone(), "spaces", |s| &s.spaces))
         .function("machines", reader(reads.clone(), "machines", |s| &s.machines))

@@ -1,9 +1,9 @@
-// AI Hub (2026-11-24): configurable team models/reasoning and live work views with reviewed handoffs.
+// AI Hub (2026-11-24): a persistent team manager and live work tabs in one ordinary Space.
 import { View, div, svg } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import {
-  theme, spaces, panes, terminals, props, checking, openOverlay, closeOverlay, nextCommand, pickFolder,
-  shared, setShared, hc, exec, run, knownAgents, readTextFile, writeTextFile, appHome, home, window,
+  theme, spaces, panes, terminals, props, checking, closeOverlay, nextCommand, pickFolder,
+  shared, setShared, hc, exec, run, command, knownAgents, readTextFile, writeTextFile, appHome, home, window,
 } from "herdr";
 import { defaultProfiles, readState, activeStage, nextStage } from "./model.js";
 import { createRuntime } from "./runtime.js";
@@ -42,18 +42,24 @@ function localProject() {
 
 export default class Team extends View {
   init(_props, cx) {
-    const entryProps = _props?.view === "workspace" ? _props : props();
+    const entryProps = _props?.view === "workspace" || _props?.embedded === true ? _props : props() ?? {};
     if (entryProps?.view === "workspace") {
       this.workspaceView = new WorkspaceView();
       this.workspaceView.init(entryProps, cx);
       return;
     }
     this.isCheck = checking();
+    const localId = (value) => typeof value === "string" && value.length > 0 && !value.includes("/");
+    this.embedded = entryProps.embedded === true && [entryProps.space, entryProps.tab, entryProps.pane].every(localId);
+    this.placement = this.embedded ? { spaceId: entryProps.space, tabId: entryProps.tab, paneId: entryProps.pane } : null;
     this.runtime = this.isCheck ? null : createRuntime({
       shared, setShared, hc, exec, run, knownAgents, readTextFile, writeTextFile, appHome, home, window,
+      ...(this.placement ? { placement: { spaceId: this.placement.spaceId, tabId: this.placement.tabId } } : {}),
     });
-    this.workspace = this.isCheck ? null : createWorkspace({ openOverlay, closeOverlay, terminals, shared, setShared, run });
+    this.workspace = this.isCheck ? null : createWorkspace({ command, spaces, panes, terminals, shared, setShared, placement: this.placement });
     this.workspaceError = null;
+    this.workspaceTask = null;
+    this.workspaceSyncQueued = false;
     this.autoOpenWorkspace = true;
     this.state = this.runtime ? this.runtime.getState() : readState(null);
     this.screen = this.currentRun() ? "run" : "new";
@@ -79,7 +85,7 @@ export default class Team extends View {
     this.newAuto = false;
     this.handle = cx.focus_handle();
     const project = this.isCheck ? { folder: "", spaceId: null, remote: false } : localProject();
-    this.projectSpaceId = project.spaceId;
+    this.projectSpaceId = this.placement?.spaceId ?? project.spaceId;
     this.remoteProject = project.remote;
     this.titleInput = InputState.new({ placeholder: "예: 로그인 오류 수정" });
     this.goalInput = TextareaState.new({ placeholder: "무엇을 만들거나 고칠까요? 원하는 결과와 확인할 조건을 적어 주세요.", rows: 4 });
@@ -99,6 +105,7 @@ export default class Team extends View {
     if (this.isCheck) return;
     this.handle.focus();
     this.loadAgents(cx);
+    this.syncWorkspace();
     cx.timer.every(3000, (cx) => this.refresh(cx));
     cx.spawn(async (cx) => {
       for (;;) {
@@ -346,17 +353,33 @@ export default class Team extends View {
 
   syncWorkspace() {
     if (this.isCheck || this.closed || !this.workspace || !this.currentRun()) return;
-    try { this.workspace.sync(this.currentRun()); }
-    catch (error) { this.workspaceError = message(error); }
+    // Coalesce polling while a tab update is pending. Read the latest run when
+    // the queued update begins, including a retry's new attempt/terminal.
+    this.workspaceSyncQueued = true;
+    if (this.workspaceTask) return this.workspaceTask;
+    const sync = async () => {
+      while (this.workspaceSyncQueued && !this.closed && !this.isCheck) {
+        this.workspaceSyncQueued = false;
+        const current = this.currentRun();
+        if (!current) break;
+        try { await this.workspace.sync(current); this.workspaceError = null; }
+        catch (error) { this.workspaceError = message(error); }
+      }
+    };
+    const task = sync();
+    this.workspaceTask = task;
+    task.then(() => { if (this.workspaceTask === task) this.workspaceTask = null; },
+      (error) => { this.workspaceError = message(error); if (this.workspaceTask === task) this.workspaceTask = null; });
+    return task;
   }
 
-  openWorkspace(current, cx) {
+  openWorkspace(current, cx, options = {}) {
     if (this.isCheck || this.closed || !this.workspace || !current) return;
-    try {
-      this.workspace.open(current);
-      this.workspaceError = null;
-    } catch (error) { this.workspaceError = message(error); }
-    cx?.notify();
+    cx.spawn(async (cx) => {
+      try { await this.workspace.open(current, options); this.workspaceError = null; }
+      catch (error) { this.workspaceError = message(error); }
+      cx.notify();
+    });
   }
 
   closeWorkspace() {
@@ -371,13 +394,13 @@ export default class Team extends View {
     catch (error) { this.workspaceError = message(error); return null; }
   }
 
-  showStartedWorkspace(cx, viewerToken) {
+  async showStartedWorkspace(cx, viewerToken) {
     this.syncState();
     if (this.isCheck || this.closed || !this.workspace || !viewerToken) return;
     const current = this.currentRun();
     const stage = current && activeStage(current);
     if (this.autoOpenWorkspace && stage?.terminal && ["running", "ready"].includes(stage.status)) {
-      try { this.workspace.autoOpen(current, viewerToken); this.workspaceError = null; }
+      try { await this.workspace.autoOpen(current, viewerToken); this.workspaceError = null; }
       catch (error) { this.workspaceError = message(error); }
       cx?.notify();
     }
@@ -403,11 +426,22 @@ export default class Team extends View {
   close() {
     if (this.workspaceView) { this.workspaceView.close(); return; }
     this.closed = true;
+    this.workspaceSyncQueued = false;
     this.stopAutomatic();
     this.closeWorkspace();
   }
 
   dismiss(cx) {
+    if (this.embedded) {
+      if (this.agentPicker || this.modelPicker) {
+        this.agentPicker = null;
+        this.modelPicker = null;
+        cx.notify();
+      } else if (this.screen !== "run" && this.currentRun()) this.navigate("run", cx);
+      // Esc belongs to navigation in a normal tab. Closing its pane/Space
+      // invokes close(), where future automatic handoffs are paused.
+      return;
+    }
     if (!this.allowNavigation(null, cx)) return;
     this.stopAutomatic();
     const id = props()?.overlay;
@@ -419,7 +453,6 @@ export default class Team extends View {
     this.screen = screen;
     this.notice = null;
     this.error = null;
-    if (screen !== "run") { this.stopAutomatic(); this.closeWorkspace(); }
     cx.notify();
   }
 
@@ -455,12 +488,13 @@ export default class Team extends View {
   }
 
   refresh(cx) {
-    if (this.isCheck || this.closed || this.screen !== "run") return;
+    if (this.isCheck || this.closed) return;
     this.syncState();
+    cx.notify();
     // A launch/retry can change attempt identity before its async CLI setup ends.
     // Keep the viewer current even while network/process refreshes are paused.
     if (this.busy || this.refreshing) return;
-    const current = this.currentRun();
+    const current = this.state.runs.find((entry) => entry.id === this.armedRunId) ?? this.currentRun();
     const stage = current && activeStage(current);
     if (!current || !["launching", "running", "ready"].includes(stage?.status)) return;
     this.refreshing = true;
@@ -485,7 +519,7 @@ export default class Team extends View {
       const folder = await pickFolder({ prompt: "프로젝트 선택" });
       if (folder) {
         this.folderInput.set_value(folder);
-        this.projectSpaceId = null;
+        this.projectSpaceId = this.placement?.spaceId ?? null;
         this.remoteProject = false;
       }
     });
@@ -500,6 +534,9 @@ export default class Team extends View {
     };
     this.perform(cx, "첫 역할을 시작하는 중…", async () => {
       const current = this.runtime.create(input);
+      // Browsing New no longer pauses the existing run. Starting a different
+      // run does: an in-flight automatic handoff must see that saved stop.
+      this.stopAutomatic();
       this.runtime.select(current.id);
       this.runtime.setAuto(current.id, this.newAuto);
       this.screen = "run";
@@ -510,7 +547,7 @@ export default class Team extends View {
       this.armedRunId = current.id;
       const viewerToken = this.workspaceAutoToken();
       await this.runtime.launch(current.id);
-      this.showStartedWorkspace(cx, viewerToken);
+      await this.showStartedWorkspace(cx, viewerToken);
     });
   }
 
@@ -523,7 +560,6 @@ export default class Team extends View {
       return;
     }
     this.stopAutomatic();
-    this.closeWorkspace();
     this.runtime.select(id);
     this.screen = "run";
     this.selectedStageId = null;
@@ -556,7 +592,7 @@ export default class Team extends View {
       this.reportDirty = false;
       const viewerToken = this.workspaceAutoToken();
       await this.runtime.launch(current.id);
-      this.showStartedWorkspace(cx, viewerToken);
+      await this.showStartedWorkspace(cx, viewerToken);
     });
   }
 
@@ -569,7 +605,7 @@ export default class Team extends View {
       this.selectedStageId = null;
       this.reportEditing = false;
       this.reportDirty = false;
-      this.showStartedWorkspace(cx, viewerToken);
+      await this.showStartedWorkspace(cx, viewerToken);
     });
   }
 
@@ -714,8 +750,8 @@ export default class Team extends View {
           .child(div().w(70).text_right().text_size(10.5).text_color(this.toolHint(profile.agent) === "설치 필요" ? t.blocked : t.dim).child(this.toolHint(profile.agent))))))
       .child(this.toggle(t, "team-new-auto", this.newAuto, "보고서가 준비되면 다음 역할 자동 실행", (cx) => { this.newAuto = !this.newAuto; cx.notify(); },
         "기본은 직접 확인 후 진행입니다. 자동 실행 중에도 보고서에 차단 이슈가 있으면 멈춥니다."))
-      .child(this.toggle(t, "team-new-workspace", this.autoOpenWorkspace, "시작하면 실시간 작업 화면 열기", (cx) => { this.autoOpenWorkspace = !this.autoOpenWorkspace; cx.notify(); },
-        "첫 역할이 실행되면 담당 AI의 터미널을 3분할 작업 화면으로 보여 줍니다."))
+      .child(this.toggle(t, "team-new-workspace", this.autoOpenWorkspace, "시작하면 실시간 작업 탭으로 이동", (cx) => { this.autoOpenWorkspace = !this.autoOpenWorkspace; cx.notify(); },
+        "같은 AI 팀 Space에서 Claude는 왼쪽, Codex와 OpenCode는 오른쪽 위·아래에 표시합니다."))
       .child(h_flex().gap(12).items_center()
         .child(this.button(t, "team-start", "AI 팀 시작", (cx) => this.start(cx), { primary: true, disabled: !valid }))
         .child(div().flex_1().text_size(11).text_color(t.dim).child("팀 기록은 프로젝트의 .ai-hub/team에 저장됩니다.")));
@@ -866,11 +902,8 @@ export default class Team extends View {
         .child(div().id(`team-stage-model-${stage.id}`).min_w(0).truncate().tooltip(stage.model || "도구 기본 모델").text_size(10.5).text_color(t.dim).child(stage.model || "도구 기본 모델"))
         .child(div().id(`team-stage-effort-${stage.id}`).text_size(10.5).text_color(t.muted).child(`추론 강도: ${this.effortName(stage)}`))
         .child(div().text_size(10.5).text_color(t.dim).child(this.accessName(stage.access)))
-        .when(Boolean(stage.terminal), (element) => element.child(this.button(t, `team-terminal-${stage.id}`, "터미널 열기", (cx) => {
-          if (this.isCheck) return;
-          try { this.runtime.openTerminal(current.id, stage.id); }
-          catch (error) { this.error = message(error); cx.notify(); }
-        }, { small: true })))));
+        .when(Boolean(stage.terminal), (element) => element.child(this.button(t, `team-terminal-${stage.id}`, "작업 탭에서 보기",
+          (cx) => this.openWorkspace(current, cx, { stageId: stage.id }), { small: true })))));
   }
 
   reportSection(t, title, body) {
@@ -969,9 +1002,9 @@ export default class Team extends View {
     return v_flex().id("team-live-work").p(15).gap(10).rounded(9).border_1().border_color(t.accent + "66").bg(t.raised)
       .child(h_flex().gap(12).items_center().flex_wrap()
         .child(v_flex().flex_1().min_w(0).gap(4)
-          .child(div().text_size(14).font_semibold().text_color(t.foreground).child("실시간 작업 화면"))
-          .child(div().text_size(11).text_color(t.muted).child("담당 AI의 터미널과 진행 상태를 3분할로 봅니다.")))
-        .child(this.button(t, "team-open-workspace", "실시간 작업 화면 열기", (cx) => this.openWorkspace(current, cx), { primary: true })))
+          .child(div().text_size(14).font_semibold().text_color(t.foreground).child("실시간 작업"))
+          .child(div().text_size(11).text_color(t.muted).child("같은 Space의 작업 탭에서 담당 AI의 터미널을 3분할로 봅니다.")))
+        .child(this.button(t, "team-open-workspace", "실시간 작업 탭 열기", (cx) => this.openWorkspace(current, cx), { primary: true })))
       .when(Boolean(stage), (element) => element.child(h_flex().gap(8).items_center().flex_wrap()
         .child(div().text_size(12).font_medium().text_color(t.foreground).child(`현재 역할: ${stage.roleName} · ${this.toolName(stage.agent)}`))
         .child(this.badge(t, current.status === "paused" ? "paused" : stage.status))))
@@ -982,7 +1015,7 @@ export default class Team extends View {
       .child(div().id("team-current-state").text_size(11.5).text_color(t.muted).child(detail))
       .when(Boolean(stage?.error || stage?.reportError), (element) => element.child(div().id("team-live-error").text_size(11).text_color(t.blocked).child(stage.error || stage.reportError)))
       .when(Boolean(this.workspaceError), (element) => element.child(div().id("team-workspace-error").text_size(11).text_color(t.blocked).child(`작업 화면을 열거나 갱신하지 못했습니다: ${this.workspaceError}`)))
-      .child(div().text_size(10.5).text_color(t.dim).child("화면을 여는 동작은 AI를 새로 실행하지 않습니다. 다음 역할은 아래의 인수인계 흐름으로 진행합니다."));
+      .child(div().text_size(10.5).text_color(t.dim).child("탭이나 Space를 바꿔도 팀의 진행을 유지합니다. 작업 탭을 여는 것만으로 AI를 새로 실행하지 않습니다."));
   }
 
   runView(current, t) {
@@ -1046,11 +1079,13 @@ export default class Team extends View {
       .on_key_down((event, cx) => {
         if (event.key === "escape") { this.dismiss(cx); cx.stop_propagation(); }
       })
-      .child(h_flex().flex_none().h(57).px(20).gap(11).items_center().cursor_grab()
+      .child(h_flex().flex_none().h(57).px(20).gap(11).items_center()
+        .when(!this.embedded, (element) => element.cursor_grab())
         .child(svg("mods/team/team.svg").size(22).text_color(t.accent))
         .child(v_flex().flex_1().gap(2).child(div().text_size(17).font_semibold().child("AI 팀"))
-          .child(div().text_size(10.5).text_color(t.dim).child("역할을 나누고, 결과를 확인하고, 다음으로 연결하세요")))
-        .child(this.button(t, "team-close", "닫기", (cx) => this.dismiss(cx), { small: true })))
+          .child(div().text_size(10.5).text_color(t.dim).child(this.embedded ? "팀 관리 · 다른 탭이나 Space에서도 진행을 유지합니다" : "역할을 나누고, 결과를 확인하고, 다음으로 연결하세요")))
+        .when(this.embedded && Boolean(current), (element) => element.child(this.button(t, "team-tab-workspace", "실시간 작업 탭", (cx) => this.openWorkspace(current, cx), { small: true })))
+        .when(!this.embedded, (element) => element.child(this.button(t, "team-close", "닫기", (cx) => this.dismiss(cx), { small: true }))))
       .child(h_flex().flex_none().px(20).pb(10).gap(5).items_center().border_b(1).border_color(t.border)
         .on_mouse_down("left", (_event, cx) => cx.stop_propagation())
         .child(tab("new", "새 작업"))

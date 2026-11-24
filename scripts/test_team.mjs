@@ -134,6 +134,33 @@ test("model and access are immutable run snapshots independent of later profile 
   assert.throws(() => updateStage(run, "build", { access: "read" }, NOW + 1), /변경할 수 없습니다/);
 });
 
+test("persistent local placement survives state reads and role transitions without rewriting old runs", () => {
+  const placed = make({ spaceId: "spteam", tabId: "tbmanager" });
+  const advanced = complete(ready(running(placed)));
+  assert.equal(advanced.spaceId, "spteam"); assert.equal(advanced.tabId, "tbmanager");
+  assert.deepEqual(readState(state(advanced)).runs[0], advanced);
+  const old = running(make()); delete old.tabId;
+  const before = JSON.stringify(old), restored = readState(state(old)).runs[0];
+  assert.equal(restored.tabId, null);
+  assert.equal(restored.spaceId, old.spaceId);
+  assert.deepEqual(restored.stages, old.stages);
+  assert.equal(JSON.stringify(old), before, "normalizing an old run does not mutate its stored record");
+});
+
+test("persistent placement requires a complete safe local space and tab pair", () => {
+  for (const placement of [
+    { spaceId: null, tabId: "tb1" }, { spaceId: "remote/sp1", tabId: "tb1" },
+    { spaceId: "sp1", tabId: "remote/tb1" }, { spaceId: "sp1", tabId: "../tb1" },
+    { spaceId: "sp1", tabId: "tb1\n" }, { spaceId: "sp1", tabId: "a".repeat(97) },
+    { spaceId: "sp1 other", tabId: "tb1" },
+  ]) {
+    assert.throws(() => make(placement), /ID|팀 작업 위치/);
+    const invalid = { ...make(), ...placement };
+    assert.ok(validateStart(invalid, activeStage(invalid)));
+    assert.equal(readState(state(invalid)).runs.length, 0);
+  }
+});
+
 test("only untouched historical defaults migrate; old runs retain their assigned agents", () => {
   const profiles = legacyDefaults();
   const prepared = running(make({ profiles }));

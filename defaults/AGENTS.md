@@ -620,6 +620,15 @@ The main ones:
   `tab.select {index | id}`, `tab.next`, `tab.prev`,
   `tab.settle {id?}`, `tab.unsettle {id?}` (index, next and prev
   skip settled tabs).
+- `tab.layout {id}` reads one explicit tab as `{space, tab, layout}`.
+  `tab.layout {id, layout, expected, adopt?}` replaces a local tab's row/column
+  composition only when `expected` still matches its complete previous layout.
+  Terminal and mod blocks are supported; recursive tab content and chrome-only
+  constructs are rejected. Preserve existing terminals, using a hidden archive
+  when they are no longer shown. An incoming terminal needs an explicit
+  `adopt: [{terminal, labels: {key: value}}]` proof matching its live labels.
+  Rebinding never launches or kills a terminal. Read again after a conflict;
+  do not overwrite another change with an old snapshot.
 - New spaces and tabs are shown at once. `focus: false` on `space.new` or
   `tab.new` keeps the shown space and the target space's selected tab (with no
   space shown, the new space is shown), for work the person looks at later;
@@ -702,7 +711,7 @@ The main ones:
   (personal tree edits; on shipped layouts only click/look fields change),
   `layout.reset {name?}` (reset a shipped layout and its clicks),
   `layout.clone {name, as?}` (duplicate, then switch; default `<name>-copy`).
-- App: `mod.clone {name, as?}` (duplicate; default `<name>-copy`), `mod.open {name}` (again: closes it), `overlay.close {id?}`, `app.help` (again: closes it), `app.palette` (again: closes it), `app.settings {section?}`
+- App: `mod.clone {name, as?}` (duplicate; default `<name>-copy`), `mod.open {name}` (a manifest `space` selects its persistent Space; otherwise toggles its overlay), `overlay.close {id?}`, `app.help` (again: closes it), `app.palette` (again: closes it), `app.settings {section?}`
   (sections: `look`, `machines`, `alerts`, `updates`, `privacy`; Machines lists, updates, renames and removes ssh machines; settings edit the same files you do).
   `app.check_updates` (only a successful check reports Up to date; a failed check clears the checked time and can be retried), `app.update_core` (a newer herdr-core of this generation, terminals kept;
   never one a package manager owns), `app.welcome`, `app.whats_new`, `app.feedback {message?, from?}` (from `"person"` or `"agent"`; opens a review window, where the person can paste up to 3 screenshots; never sends until the person clicks Send), `app.reset`,
@@ -937,11 +946,22 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   again after a popup over it closes. Leave with `run("pane.go", {direction})`.
   Without this opt-in, navigation and clicks stay unchanged.
 
+- `"space": {"name":"My tools", "tab":"Manage", "props":{}}` in `mod.json`
+  makes `mod.open` create or select one local Space owned by that mod, with a
+  management mod tab and no extra shell. Ownership survives renaming and app
+  restarts. The manager receives stable `embedded: true`, `space`, `tab`, and
+  `pane` props. Same-owner mod tabs created in this Space are managed tabs;
+  they use their authored composition instead of the window's generic pane
+  frame. Incoming labeled terminals stay in a hidden archive until the mod
+  places them. Closing a native tab/Space retains its ordinary terminal-stop
+  semantics; a closed owned target cannot be recreated by a late terminal.
+
 - `"palette"` in `mod.json` adds entries each time the command palette opens.
   For example, `"palette": [{ "title": "TUI sessions", "command": "mod.open", "args": { "name": "tui-sessions" }, "words": "agents" }]`.
   Use an app command with its required arguments in `args`, or this mod's own
   `<mod>.<command>` with no arguments. A mod command needs a shown copy listening
-  with `nextCommand()`. Use `mod.open {name}` to open a mod as an overlay, or
+  with `nextCommand()`. Use `mod.open {name}` to open a mod according to its
+  `space` or overlay declaration, or
   `tab.new {mod, props}` to open one with props. `group` defaults to "Mod"
   ("Recent" is reserved). `words` is an optional string of search terms.
   Malformed entries and duplicate command and argument pairs are skipped.
@@ -982,8 +1002,10 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
 
 ### AI team workflow (`team`)
 
-AI Hub's shipped `team` mod opens from the sidebar's **AI 팀** or the command
-palette, or `herdr-app do mod.open --name team`. It runs an ordered local team.
+AI Hub's shipped `team` mod opens its persistent **AI 팀 Space** from the
+sidebar, command palette, or `herdr-app do mod.open --name team`. Reopening
+selects the same **팀 관리** tab; it does not create another Space or shell.
+It runs an ordered local team.
 Defaults: plan (Claude Code), implement (OpenCode Go, model
 `opencode-go/deepseek-v4.1-flash`), review (Codex), verify (Claude Code).
 The person can add/remove/reorder 1–8 roles and edit their name, installed agent,
@@ -1016,8 +1038,8 @@ original terminal by its labels before deciding what happened.
 The CLI's `run --json` and `ls --json` responses are compact records without labels;
 fetch each candidate with `get <address> --json` before verifying ownership.
 
-**실시간 작업 화면** opens the team's existing terminals in a separate native
-window: Claude on the left (65%), Codex at upper right, OpenCode at lower right.
+**실시간 작업 탭 열기** shows the team's existing terminals in a second ordinary
+tab in the same Space: Claude left (65%), Codex upper right, OpenCode lower right.
 Its toolbar offers 55/65/75% widths; each pane's **담당** menu can follow one tool's
 latest started role or pin a specific role. Unstarted roles show waiting cards,
 and finished roles without a live terminal show their report summary. This view
@@ -1027,12 +1049,18 @@ or ambiguous match remains a placeholder. A terminal is attached only once even
 if two slots select it. Actual output, CLI tool calls and permission prompts remain
 interactive in the native terminal; provider-private reasoning is not invented.
 
-The original Team controller stays open behind this window and owns handoffs.
-**팀 관리 · 보고서** returns to it. Closing the viewer does not restart or interrupt
-work. Closing/leaving Team still disarms automation and closes its viewer.
-The native window closes if an attached terminal ends; use Team's workspace button
-to inspect the remaining roles again. The view's `ai-hub.team.workspace.v1` shared
-preferences never authorize execution or automatically reopen a viewer on restart.
+The stable management tab owns handoffs. **팀 관리 · 보고서** selects that tab.
+Tab/Space switches and profile/history navigation keep the controller alive;
+choosing another run, editing a report, or closing management disarms it.
+The native work tab uses inline assignment controls. Ended terminals become
+placeholders while other slots and the Space remain. Earlier live roles/attempts
+stay in a hidden archive in that work tab, preventing unsolicited re-adoption.
+Closing the work tab or Space stops its terminals, including archived ones.
+App restart may restore existing tabs but never arms automatic execution.
+The view's `ai-hub.team.workspace.v1` preferences are display state, not permission
+to launch work. Passive refresh cannot recreate a user-closed tab or Space.
+An embedded runtime stores the stable manager `spaceId`/`tabId` for future stages;
+old terminal identities and reports remain unchanged when their display moves.
 
 Before starting OpenCode with a chosen model, require its exact ID in the local
 model list and inspect CLI help for supported model/prompt flags. The root TUI
@@ -1057,8 +1085,8 @@ report, completed work observed from core status (not startup idle), and no
 reported failed tests or issues. Authentication/permission waits, abnormal exits,
 lost terminals, and malformed reports do not count as success. Stop automatic
 progression separately from interrupting the current AI. Reopening a record does
-not arm it; starting or advancing it does. Closing or leaving the panel and
-editing a report disarm it. Keep `model.js` pure and the runtime host-injected;
+not arm it; starting or advancing it does. Closing management, choosing another
+run, and editing a report disarm it. Keep `model.js` pure and the runtime host-injected;
 `node --test scripts/test_team.mjs scripts/test_team_runtime.mjs scripts/test_team_workspace.mjs` checks their
 contracts. `checking()` must render the team UI without spawning workers,
 writing data, or installing timers.
@@ -1285,7 +1313,8 @@ The full surface is in `gpui-kit.d.ts` next to this file.
 All of it is in `herdr.d.ts`. In short:
 
 - Live data: `spaces()` (each with its tabs, status, name, named, folder,
-  machine, branch), `machines()` (name, null for this computer; layout:
+  machine, branch, and optional owning `mod`; tabs include `managed` and
+  `manager` booleans), `machines()` (name, null for this computer; layout:
   `loading`, `ready`, or `unavailable` on this connection; loading ends on
   the first read even if it fails, and offline machines are unavailable),
   `agents()` (status, app, space, tab, pinned, focused; "done" turns "idle"
@@ -1309,7 +1338,11 @@ All of it is in `herdr.d.ts`. In short:
   For composition navigation: `run("pane.focus", {terminal: nextAddress})`.
   Terminal copy/paste and implicit right-click routing follow the focused block.
 - Floating: `placement()` (null unless this copy floats).
-- Act: `run(command, args)`.
+- Act: `run(command, args)` queues a command without a result.
+  `await command(name, args)` returns the same checked native result as
+  `herdr-app do` and rejects command errors or window shutdown. Its result
+  confirms model application, not that asynchronous core-document persistence
+  has finished. Both use the normal command and document-availability checks.
 - Overlays: `openOverlay({ mod, props, kind: "dialog" | "popup" | "window", width, height, at, frame })`
   returns an id; the mod gets `props().overlay` and closes itself with
   `closeOverlay(id)`; Esc closes the top dialog or popup. `frame: "none"`

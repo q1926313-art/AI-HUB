@@ -7,6 +7,7 @@
 
 use crate::hc::Core;
 mod floats;
+mod managed_tabs;
 mod movable;
 mod pane_drag;
 mod pane_size;
@@ -1390,7 +1391,7 @@ impl AppWindow {
                     out.insert(n.id.clone(), inst(name, props));
                 }
                 if let Some((name, props)) = &header
-                    && n.is_pane()
+                    && !managed_tabs::managed(c) && n.is_pane()
                 {
                     let (slot, i) = pane_header_mod(n, name, props);
                     out.insert(slot, i);
@@ -1941,7 +1942,17 @@ impl AppWindow {
                 // The branch of the terminal the space shows first.
                 let first = p.active_tab().and_then(|c| c.focused_pane()).and_then(|pane| m.address_of(&pane));
                 let branch = first.and_then(|a| m.folder_info.get(&a)).and_then(|f| f.branch.clone());
-                model::space_json(m, p, i, branch.as_deref(), &home)
+                let mut value = model::space_json(m, p, i, branch.as_deref(), &home);
+                if let Some(owner) = managed_tabs::owner(p) { value["mod"] = json!(owner); }
+                if let Some(tabs) = value.get_mut("tabs").and_then(Value::as_array_mut) {
+                    for tab in tabs {
+                        if let Some(model) = tab["id"].as_str().and_then(|id| p.tab(id)) {
+                            tab["managed"] = json!(managed_tabs::managed(model));
+                            tab["manager"] = json!(managed_tabs::manager(model));
+                        }
+                    }
+                }
+                value
             })
             .collect();
         // A window's terminal with the keyboard first, then a layout terminal block.
@@ -2435,7 +2446,9 @@ impl AppWindow {
                 let labels = r.get("labels")?;
                 let space = labels.get("herdr.space")?.as_str().filter(|s| !s.is_empty())?;
                 let tab = labels.get("herdr.tab").and_then(Value::as_str).filter(|s| !s.is_empty());
-                Some((a.clone(), crate::mirror::qualify(space, machine), tab.map(|t| crate::mirror::qualify(t, machine))))
+                let space = crate::mirror::qualify(space, machine);
+                let tab = tab.map(|t| crate::mirror::qualify(t, machine));
+                self.allow_adoption(&space, tab.as_deref()).then(|| (a.clone(), space, tab))
             }).collect::<Vec<_>>();
         orphans.sort();
         for (addr, space, tab) in orphans {
@@ -2464,6 +2477,7 @@ impl AppWindow {
                 if generation != this.core_generation || this.draining { return; }
                 if matches!(ready, Ok(true)) && this.model.pane_of(&addr).is_none()
                     && this.require_document(addr.split_once('/').map(|(m, _)| m)).is_ok()
+                    && this.allow_adoption(&space, tab.as_deref())
                 {
                     this.adopt(&addr, &space, tab.as_deref());
                     this.sync(window, cx);
@@ -2477,6 +2491,7 @@ impl AppWindow {
     /// shown. A space or tab the app doesn't know is made under the label's
     /// id, unnamed (called AI Hub's way).
     fn adopt(&mut self, addr: &str, space: &str, ctx: Option<&str>) {
+        if self.archive_adopted(addr, space, ctx) { return; }
         let machine = addr.split_once('/').map(|(m, _)| m.to_owned());
         let pane = self.model.fresh_id_on("p", machine.as_deref());
         let ctx_id = ctx.map(str::to_owned).unwrap_or_else(|| self.model.fresh_id_on("tb", machine.as_deref()));
@@ -2769,7 +2784,9 @@ impl AppWindow {
         let machine = self.machine_of(&space);
         self.require_document(machine.as_deref())?;
         let (ctx, pane) = (self.model.fresh_id_on("tb", machine.as_deref()), self.model.fresh_id_on("p", machine.as_deref()));
+        let owner = m.clone();
         self.add_new_tab(&space, Tab::with_pane(&ctx, name.trim(), Node::block(pane.clone(), Content::Mod { name: m, props })), focus);
+        managed_tabs::mark_tab(&mut self.model, &space, &ctx, &owner);
         Ok(json!({ "space": space, "tab": ctx, "pane": pane }))
     }
 
@@ -3137,7 +3154,7 @@ impl AppWindow {
             if !args.is_object() { args = json!({}); }
             args["machine"] = json!(machine);
         }
-        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "pane.rename" | "pane.resize" | "terminal.keep" | "terminal.park") {
+        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "tab.layout" | "pane.split" | "pane.close" | "pane.swap" | "pane.rename" | "pane.resize" | "terminal.keep" | "terminal.park") {
             let node = ["id", "space", "pane"].into_iter().find_map(|k| Self::arg(&args, k));
             let target = node.and_then(|id| self.model.space(id).or_else(|| self.model.space_of(id))).or_else(|| self.model.active_space());
             let machine = if name == "space.new" { Self::arg(&args, "machine") }
@@ -3213,6 +3230,7 @@ impl AppWindow {
                     self.confirm("Close space?", &detail, "space.close", json!({ "id": id, "confirmed": true }), window, cx);
                     return;
                 }
+                self.remember_managed_spaces();
                 let addrs = self.model.remove_space(&id);
                 self.kill(addrs, cx);
             }
@@ -3266,6 +3284,7 @@ impl AppWindow {
                     args["confirmed"] = a.get("confirmed").cloned().unwrap_or(Value::Null);
                     return self.dispatch("space.close", &args, person, window, cx);
                 }
+                self.remember_managed_spaces();
                 let (addrs, _) = self.model.remove_tab(&id);
                 self.kill(addrs, cx);
             }
@@ -3274,6 +3293,10 @@ impl AppWindow {
                 let Some(name) = Self::arg(a, "name") else { return self.fail("tab.rename needs name (empty: its number)") };
                 let Some(c) = self.model.tab_mut(&id) else { return self.fail(format!("no tab {id:?}")) };
                 c.name = name.trim().to_owned();
+            }
+            "tab.layout" => {
+                let result = self.tab_layout(a);
+                self.answer(result);
             }
             "tab.move" => {
                 let Some(id) = Self::owned(a, "id").or(active_ctx) else { return self.fail("no tab") };
@@ -3691,6 +3714,16 @@ impl AppWindow {
             "mod.open" => {
                 let name = Self::arg(a, "name").unwrap_or_default();
                 let Some(f) = self.view_mod(name) else { return self.fail(format!("no mod folder {name:?}")) };
+                match managed_tabs::specification(&f.dir) {
+                    Ok(Some(spec)) => {
+                        let result = self.open_mod_space(name, &spec);
+                        self.answer(result);
+                        self.sync(window, cx);
+                        return;
+                    }
+                    Err(error) => return self.fail(error),
+                    Ok(None) => {}
+                }
                 let mut spec = mod_overlay(&f.dir);
                 spec["mod"] = json!(name);
                 // One popup per mod: running mod.open again toggles it, like app.settings.
@@ -4197,6 +4230,12 @@ impl AppWindow {
     fn handle(&mut self, req: Request, window: &mut Window, cx: &mut Context<Self>) {
         match req {
             Request::Run { name, args } => self.run(&name, args, window, cx),
+            Request::Command { name, args, reply } => {
+                let result = if self.draining || QUITTING.load(std::sync::atomic::Ordering::SeqCst) {
+                    json!({"error":"the window is closing; the command was cancelled"})
+                } else { self.run_as(&name, args, false, window, cx) };
+                let _ = reply.try_send(result);
+            }
             Request::OpenOverlay { id, spec } => self.open_overlay(id, spec, window, cx),
             Request::CloseOverlay { id } => self.close_overlay(&id, window, cx),
             Request::SetWindowTitle(title) => window.set_window_title(title.as_deref().unwrap_or("AI Hub")),
@@ -4577,6 +4616,7 @@ impl AppWindow {
     /// The shown tab block's pane frame, if its panes are framed now: when
     /// the tab is split, or always with `lone`.
     fn pane_frame(&self) -> Option<&PaneFrame> {
+        if self.model.active_tab().is_some_and(managed_tabs::managed) { return None; }
         let frame = self.chrome.visible_blocks().into_iter().find_map(|n| match n.content() {
             Some(Content::Context { pane, .. }) => pane.as_ref(),
             _ => None,
@@ -7197,6 +7237,78 @@ mod tests {
     #[test]
     fn new_tabs_without_focus_leave_the_shown_tab() {
         in_own_process("tab_new_without_focus");
+    }
+
+    #[test]
+    fn managed_spaces_and_awaited_commands_use_normal_tabs_without_shells() {
+        in_own_process("managed_command_space");
+    }
+
+    #[gpui::test]
+    fn managed_command_space(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("managed_command_space") { return; }
+        let source = r#"import { View, div } from "gpui-kit";
+import { props, command, spaces, setShared } from "herdr";
+export default class Board extends View {
+  init(_props, cx) {
+    const p = props();
+    if (!p.embedded) return;
+    cx.spawn(async () => {
+      try {
+        const result = await command("tab.layout", {id: p.tab});
+        const work = await command("tab.new", {space: p.space, mod: "board", props: {view: "work"}, focus: false});
+        const published = spaces().find(space => space.id === p.space)?.tabs.find(tab => tab.id === work.tab);
+        setShared("managed-command-result", {tab: result.tab, space: result.space, custom: p.custom, work: work.tab,
+          published: published?.managed === true && published?.manager === false});
+        try { await command("tab.layout", {id: "missing-tab"}); }
+        catch (error) { setShared("managed-command-error", String(error)); }
+      } catch (error) { setShared("managed-command-unexpected", String(error)); }
+    });
+  }
+  render() { return div().child("ordinary managed tab"); }
+}"#;
+        let (view, cx) = open_window(cx, "board", source, json!({
+            "id":"main", "type":"block", "content":{"tab":"active", "pane":{"lone":true,"header":{"content":{"mod":"pane"}}}}
+        }));
+        cx.run_until_parked();
+        std::fs::write(crate::mods::app_dir().join("mods/board/mod.json"), json!({
+            "place":"none", "space":{"name":"AI team", "tab":"Manage", "props":{"custom":17}}
+        }).to_string()).unwrap();
+        let opened = cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.documents.entry(String::new()).or_default().available = true;
+            this.run_as("mod.open", json!({"name":"board"}), false, window, cx)
+        }));
+        assert!(opened.get("error").is_none(), "{opened}");
+        cx.run_until_parked();
+        assert_eq!(crate::mods::shared("managed-command-unexpected"), None);
+        let observed = crate::mods::shared("managed-command-result").expect("awaited commands completed");
+        assert_eq!(observed["space"], opened["space"]);
+        assert_eq!(observed["tab"], opened["tab"]);
+        assert_eq!(observed["custom"], 17);
+        assert_eq!(observed["published"], true, "tab.new publishes its managed snapshot before its Promise resolves");
+        assert!(crate::mods::shared("managed-command-error").and_then(|v| v.as_str().map(str::to_owned)).is_some_and(|error| error.contains("no tab")));
+        view.update_in(cx, |this, window, cx| {
+            let pane = opened["pane"].as_str().unwrap();
+            let tab = opened["tab"].as_str().unwrap();
+            let copy = this.copies.get(pane).expect("management pane is mounted").id;
+            assert!(this.model.all_addresses().is_empty(), "opening a mod Space must not spawn a shell");
+            assert!(!this.overlays.iter().any(|overlay| this.copies.get(&overlay.slot).is_some_and(|copy| copy.inst.name == "board")), "the manager is an ordinary tab");
+            assert!(this.pane_frame().is_none(), "managed tabs do not inherit the chrome's pane frame");
+            assert!(!this.owned_mods().contains_key(&format!("{pane}#header")));
+            assert!(this.visible().1.iter().all(|(id, _)| id != &format!("{pane}#header")));
+            assert_eq!(this.run_as("mod.open", json!({"name":"board"}), false, window, cx), opened);
+            assert_eq!(this.copies.get(pane).unwrap().id, copy, "reopening preserves the controller instance");
+            let work_id = observed["work"].as_str().unwrap();
+            assert!(super::managed_tabs::managed(this.model.tab(work_id).unwrap()));
+            assert!(!super::managed_tabs::manager(this.model.tab(work_id).unwrap()));
+            assert_eq!(this.model.active_tab().unwrap().id, tab);
+            let (reply, receive) = async_channel::bounded(1);
+            this.draining = true;
+            this.handle(crate::mods::Request::Command {name:"tab.layout".into(),args:json!({"id":tab}),reply}, window, cx);
+            assert!(receive.try_recv().unwrap()["error"].as_str().is_some_and(|error| error.contains("cancelled")));
+            this.draining = false;
+        });
     }
 
     /// `tab.new {mod, focus: false}` adds the tab at the end of its space,

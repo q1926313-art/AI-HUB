@@ -2,11 +2,10 @@
   "place": "none",
   "title": "AI 팀",
   "focusable": true,
-  "overlay": {
-    "kind": "window",
-    "key": "ai-team",
-    "width": 960,
-    "height": 0.88
+  "space": {
+    "name": "AI 팀",
+    "tab": "팀 관리",
+    "props": { "embedded": true }
   },
   "palette": [
     {

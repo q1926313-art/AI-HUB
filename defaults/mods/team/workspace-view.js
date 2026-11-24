@@ -1,7 +1,7 @@
-// AI Hub: live terminal chrome. The original Team view owns execution.
+// AI Hub: live terminal chrome inside the team's ordinary Space and work tab.
 import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { theme, props, checking, shared, setShared, closeOverlay, openOverlay, terminals } from "herdr";
+import { theme, props, checking, shared, setShared, command, spaces, terminals } from "herdr";
 import { readState, activeStage, STATE_KEY } from "./model.js";
 import { WORKSPACE_KEY, TOOL_NAMES, choicesFor, dismissWorkspace, changeWorkspace } from "./workspace.js";
 
@@ -13,6 +13,7 @@ export default class Workspace extends View {
   init(_props, cx) {
     this.info = _props?.view === "workspace" ? _props : props() ?? {};
     this.isCheck = checking();
+    this.error = null;
     if (!this.isCheck) cx.timer.every(1000, (cx) => cx.notify());
   }
 
@@ -33,14 +34,34 @@ export default class Workspace extends View {
       .on_click((_event, cx) => { cx.stop_propagation(); if (!this.isCheck) action(cx); }).child(label);
   }
 
-  back() {
-    dismissWorkspace(host, this.info.owner, this.info.generation);
-    if (this.info.overlay) closeOverlay(this.info.overlay);
+  back(cx) {
+    if (this.isCheck) return;
+    cx.spawn(async (cx) => {
+      try {
+        const space = spaces().find((entry) => entry.id === this.info.spaceId && !entry.machine && entry.mod === "team");
+        const manager = space?.tabs.find((entry) => entry.id === this.info.managerTabId && entry.managed && entry.manager);
+        if (!manager) throw new Error("팀 관리 탭을 찾을 수 없습니다. 사이드바의 AI 팀을 다시 열어 주세요.");
+        await command("tab.select", { id: manager.id });
+        this.error = null;
+      } catch (error) { this.error = String(error?.message ?? error); }
+      cx.notify();
+    });
   }
 
-  picker(binding) {
-    openOverlay({ mod: "team", kind: "popup", width: 340, height: 420,
-      props: { ...this.info, view: "workspace", role: "picker", binding } });
+  change(patch, cx) {
+    if (this.isCheck) return;
+    try {
+      if (!changeWorkspace(host, this.info.owner, this.info.generation, patch)) {
+        throw new Error("작업 화면이 변경되었습니다. 팀 관리에서 실시간 작업 탭을 다시 열어 주세요.");
+      }
+      this.error = null;
+    } catch (error) { this.error = String(error?.message ?? error); }
+    cx?.notify();
+  }
+
+  picker(binding, cx) {
+    const current = shared(WORKSPACE_KEY);
+    this.change({ picker: current?.picker === binding.slot ? null : binding.slot }, cx);
   }
 
   toolbar(t, current) {
@@ -54,13 +75,12 @@ export default class Workspace extends View {
         .child(v_flex().flex_1().min_w(0).gap(3)
           .child(div().text_size(16).font_semibold().text_color(t.foreground).truncate().child(current?.title || "AI 팀 작업 화면"))
           .child(div().text_size(11).text_color(t.muted).child(`${info} · ${done}/${current?.stages.length ?? 0} 완료 · ${handoff}`)))
-        .child(this.button(t, "workspace-back", "팀 관리 · 보고서", () => this.back())))
+        .child(this.button(t, "workspace-back", "팀 관리 · 보고서", (cx) => this.back(cx))))
       .child(h_flex().gap(6).items_center()
         .child(div().text_size(11).text_color(t.dim).child("왼쪽 너비"))
-        .children([55, 65, 75].map((ratio) => this.button(t, "workspace-ratio-" + ratio, ratio + "%", () => {
-          changeWorkspace(host, this.info.owner, this.info.generation, { ratio });
-        }, (state?.ratio ?? 65) === ratio)))
-        .child(div().flex_1().min_w(0).ml(8).truncate().text_size(11).text_color(t.dim).child("각 칸의 담당을 바꿀 수 있습니다. 실행·승인 요청은 터미널에 표시됩니다.")));
+        .children([55, 65, 75].map((ratio) => this.button(t, "workspace-ratio-" + ratio, ratio + "%", (cx) => this.change({ ratio }, cx), (state?.ratio ?? 65) === ratio)))
+        .child(div().flex_1().min_w(0).ml(8).truncate().text_size(11).text_color(this.error ? t.blocked : t.dim)
+          .child(this.error || "이 Space의 팀 관리 탭에서 역할·모델 설정과 인수인계를 확인하세요.")));
   }
 
   header(t, current, binding) {
@@ -74,9 +94,9 @@ export default class Workspace extends View {
       .child(h_flex().items_center().gap(8)
         .child(div().flex_1().min_w(0).text_size(12).font_semibold().text_color(t.foreground).truncate().child(`${toolName(stage, binding)}${stage ? " · " + stage.roleName : ""}`))
         .child(div().text_size(10.5).text_color(color).child(label))
-        .child(this.button(t, "workspace-assign-" + binding.slot, "담당 ▾", () => this.picker(binding))))
-      .child(div().text_size(10.5).text_color(t.dim).truncate()
-        .child(`${stage?.model || "도구 기본 모델"} · 추론 ${stage?.effort || "기본값"}${binding?.choice?.startsWith("agent:") ? " · 역할 자동 연결" : " · 역할 고정"}`));
+        .child(this.button(t, "workspace-assign-" + binding.slot, "담당 ▾", (cx) => this.picker(binding, cx))))
+      .child(div().text_size(10.5).text_color(this.error ? t.blocked : t.dim).truncate()
+        .child(this.error || `${stage?.model || "도구 기본 모델"} · 추론 ${stage?.effort || "기본값"}${binding?.choice?.startsWith("agent:") ? " · 역할 자동 연결" : " · 역할 고정"}`));
   }
 
   placeholder(t, current, binding) {
@@ -93,17 +113,20 @@ export default class Workspace extends View {
       .child(div().text_size(12).text_color(t.muted).child(stage?.error || stage?.reportError || report?.summary
         || (stage?.status === "pending" ? "차례가 되어 팀이 실행하면 이 칸에 실제 작업 화면이 나타납니다." : "담당 메뉴에서 다른 역할을 고르거나 팀 관리에서 실행 상태와 보고서를 확인하세요.")))
       .when(Boolean(stage?.instructions && !report), (element) => element.child(div().text_size(11).text_color(t.dim).child(stage.instructions)))
-      .when(Boolean(report), (element) => element.child(div().text_size(11).text_color(t.dim).child("상세 결과와 다음 역할 진행은 ‘팀 관리 · 보고서’에서 확인하세요.")));
+      .when(Boolean(report), (element) => element.child(div().text_size(11).text_color(t.dim).child("상세 결과와 다음 역할 진행은 같은 Space의 ‘팀 관리’ 탭에서 확인하세요.")));
   }
 
   choose(t, current, binding) {
     const options = choicesFor(current);
-    return v_flex().id("workspace-choices").min_h(0).max_h(420).overflow_y_scrollbar().p(10).gap(7)
-      .child(div().text_size(12).font_semibold().text_color(t.foreground).child("이 칸에 표시할 담당"))
-      .children(options.map((choice, index) => this.button(t, "workspace-choice-" + index, choice.name, () => {
+    const slotName = { left: "왼쪽", top: "오른쪽 위", bottom: "오른쪽 아래" }[binding.slot] || "선택한 칸";
+    return v_flex().id("workspace-choices").size_full().min_h(0).overflow_y_scrollbar().p(10).gap(7)
+      .child(h_flex().gap(8).items_center()
+        .child(div().flex_1().text_size(12).font_semibold().text_color(t.foreground).child(`이 칸에 표시할 담당 · ${slotName}`))
+        .child(this.button(t, "workspace-choices-close", "선택 접기", (cx) => this.change({ picker: null }, cx))))
+      .when(Boolean(this.error), (element) => element.child(div().text_size(11).text_color(t.blocked).child(this.error)))
+      .children(options.map((choice, index) => this.button(t, "workspace-choice-" + index, choice.name, (cx) => {
         const state = shared(WORKSPACE_KEY);
-        changeWorkspace(host, this.info.owner, this.info.generation, { choices: { ...state?.choices, [binding.slot]: choice.id } });
-        closeOverlay(this.info.overlay);
+        this.change({ choices: { ...state?.choices, [binding.slot]: choice.id }, picker: null }, cx);
       }, choice.id === binding.choice)));
   }
 

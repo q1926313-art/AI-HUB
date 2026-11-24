@@ -49,6 +49,15 @@ function boolean(value, label) {
 }
 function nullable(value, check) { return value == null ? null : check(value); }
 function timestamp(value) { return number(typeof value === "function" ? value() : value, "시간"); }
+function runPlacement(spaceId, tabId) {
+  const space = nullable(spaceId, (v) => string(v, "공간 ID", 160));
+  const tab = nullable(tabId, (v) => token(v, "탭 ID"));
+  // Old runs did not save a tab. Keep their space value readable, but a
+  // persistent placement must be a complete pair of local native IDs.
+  if (tab && (!space || !/^[a-z0-9][a-z0-9_-]{0,95}$/.test(space) || !/^[a-z0-9][a-z0-9_-]{0,95}$/.test(tab)))
+    throw new Error("팀 작업 위치: 이 컴퓨터의 유효한 공간·탭 ID가 필요합니다.");
+  return { spaceId: space, tabId: tab };
+}
 function path(value, label) {
   const result = string(value, label, LIMITS.path);
   if (/[\u0000-\u001f\u007f]/.test(result)) throw new Error(`${label}: 제어 문자를 사용할 수 없습니다.`);
@@ -156,7 +165,7 @@ export function createRun(options, injected = {}) {
   return {
     id, title: string(options.title, "작업 이름", 160), goal: string(options.goal, "원래 목표", LIMITS.goal),
     folder: path(options.folder, "프로젝트 폴더"),
-    spaceId: nullable(options.spaceId, (v) => string(v, "공간 ID", 160)), machine: null,
+    ...runPlacement(options.spaceId, options.tabId), machine: null,
     createdAt: now, updatedAt: now, status: "draft", autoAdvance: options.autoAdvance == null ? false : boolean(options.autoAdvance, "자동 진행"),
     stages: profiles.filter((p) => p.enabled).map((p) => ({
       id: p.id, roleId: p.id, roleName: p.name, agent: p.agent, model: p.model, effort: p.effort, access: p.access, instructions: p.instructions,
@@ -242,7 +251,7 @@ function runValue(raw) {
   if (raw.status === "completed" && unfinished) throw new Error("미완료 단계가 남아 있습니다.");
   return {
     id, title: string(raw.title, "작업 이름", 160), goal: string(raw.goal, "원래 목표", LIMITS.goal), folder: path(raw.folder, "프로젝트 폴더"),
-    spaceId: nullable(raw.spaceId, (v) => string(v, "공간 ID", 160)), machine: null,
+    ...runPlacement(raw.spaceId, raw.tabId), machine: null,
     createdAt: timestamp(raw.createdAt), updatedAt: timestamp(raw.updatedAt), status: raw.status,
     autoAdvance: boolean(raw.autoAdvance ?? false, "자동 진행"), stages,
   };

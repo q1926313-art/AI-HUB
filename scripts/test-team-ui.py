@@ -23,7 +23,7 @@ import uuid
 REPO = Path(__file__).resolve().parent.parent
 PROFILE_SCENARIOS = ("profiles", "models", "claude-models", "codex-models", "effort-unsupported")
 WORKSPACE_SCENARIOS = ("workspace-toolbar", "workspace-header", "workspace-placeholder", "workspace-picker")
-SCENARIOS = ("empty", "draft", "running", "ready", "error", "busy-refresh", "history", *PROFILE_SCENARIOS, *WORKSPACE_SCENARIOS)
+SCENARIOS = ("empty", "embedded-empty", "draft", "running", "ready", "error", "busy-refresh", "history", "manager-navigation", *PROFILE_SCENARIOS, *WORKSPACE_SCENARIOS)
 
 
 def fixture_entry(scenario: str) -> str:
@@ -32,12 +32,17 @@ def fixture_entry(scenario: str) -> str:
         return workspace_fixture_entry(scenario.removeprefix("workspace-"))
     return """import Team from './mods/team/main.js';
 import { createRun, defaultProfiles, readState, updateStage } from './mods/team/model.js';
-import { createWorkspace, dismissWorkspace, WORKSPACE_KEY } from './mods/team/workspace.js';
 
 export default class NativeTeamFixture extends Team {
   init(props, cx) {
-    super.init(props, cx);
+    super.init({ embedded: true, space: 'native-team-space', tab: 'native-team-manager', pane: 'native-team-pane' }, cx);
+    if (!this.embedded || this.placement.spaceId !== 'native-team-space'
+      || this.placement.tabId !== 'native-team-manager' || this.placement.paneId !== 'native-team-pane'
+      || this.runtime !== null || this.workspace !== null || this.armed) {
+      throw new Error('The embedded manager lost its placement or initialized host execution during checking.');
+    }
     const scenario = SCENARIO;
+    if (scenario === 'embedded-empty') return;
     const now = 1700000000000;
     const profiles = defaultProfiles();
     if (['profiles', 'models', 'claude-models', 'codex-models', 'effort-unsupported'].includes(scenario)) {
@@ -193,43 +198,24 @@ export default class NativeTeamFixture extends Team {
     this.agentsLoading = false;
     this.setReportEditor(this.state.runs[0].stages[0]);
     this.reportEditing = scenario === 'ready';
-    if (scenario === 'running') {
-      let memory = null, opened = 0;
-      const host = { shared: () => memory, setShared: (_key, value) => { memory = value; },
-        terminals: () => [], openOverlay: () => 'fixture-' + (++opened), closeOverlay: () => {} };
-      this.runtime = { getState: () => this.state };
-      this.workspace = createWorkspace(host);
-      this.isCheck = false;
-      this.workspace.open(this.currentRun());
-      const token = this.workspaceAutoToken();
-      const beforeClose = host.shared(WORKSPACE_KEY);
-      dismissWorkspace(host, beforeClose.owner, beforeClose.generation);
-      this.showStartedWorkspace(cx, token);
-      if (opened !== 1) throw new Error('Automatic completion reopened a workspace closed during setup.');
-      this.openWorkspace(this.currentRun(), cx);
-      if (opened !== 2) throw new Error('An explicit request could not reopen the workspace.');
-      this.isCheck = true;
-      this.runtime = null;
-      this.workspace = null;
-    }
     if (scenario === 'busy-refresh') {
-      const synced = [];
-      // Inject in-memory collaborators only; no native process, timer or write.
-      this.runtime = { getState: () => this.state, refresh: () => { throw new Error('Busy refresh started another request.'); } };
-      this.workspace = { sync: (current) => synced.push(current.stages[0]) };
-      this.isCheck = false;
+      // Async tab updates are covered by the VM and workspace tests; this
+      // fixture materializes the actual deferred-retry controls and new attempt.
       this.busy = 'Native deferred retry setup';
-      this.refresh(cx);
-      this.busy = null;
-      this.refreshing = true;
-      this.refresh(cx);
-      if (synced.length !== 2 || synced.some((stage) => stage.attempt !== 2 || stage.terminal !== null)) {
-        throw new Error('Busy setup did not refresh the viewer with the latest attempt.');
-      }
-      this.refreshing = false;
-      this.isCheck = true;
-      this.runtime = null;
-      this.workspace = null;
+    }
+    if (scenario === 'manager-navigation') {
+      this.armed = true;
+      this.armedRunId = run.id;
+      this.navigate('profiles', cx);
+      if (!this.armed || this.armedRunId !== run.id) throw new Error('Role navigation paused the embedded controller.');
+      this.agentPicker = 'plan';
+      this.dismiss(cx);
+      if (this.agentPicker !== null || !this.armed || this.screen !== 'profiles') throw new Error('Embedded Esc did not close only the selector.');
+      this.dismiss(cx);
+      if (this.screen !== 'run' || !this.armed) throw new Error('Embedded Esc changed execution instead of navigation.');
+      this.navigate('history', cx);
+      if (!this.armed) throw new Error('History navigation paused the embedded controller.');
+      this.navigate('run', cx);
     }
   }
 }
@@ -256,6 +242,7 @@ export default class NativeWorkspaceFixture extends Team {
       current = updateStage(current, 'plan', { status: 'running', terminal: 't-native-workspace' }, current.updatedAt + 1);
     }
     const info = { view: 'workspace', role, runId: current.id, owner: 'native-check', generation: 1,
+      spaceId: 'native-team-space', managerTabId: 'native-team-manager', workspaceTabId: 'native-team-workspace',
       binding: { slot: 'left', choice: 'agent:claude', stageId: 'plan', attempt: current.stages[0].attempt, terminal: null } };
     super.init(info, cx);
     if (!this.workspaceView || this.workspaceView.info.view !== 'workspace'
@@ -352,8 +339,8 @@ def main() -> int:
                 if "check passed: " not in stdout:
                     errors.append("checker did not confirm native materialization")
                 expected = [] if scenario in WORKSPACE_SCENARIOS else ["AI 팀"]
-                if scenario == "empty":
-                    expected.extend(["어떤 일을 함께 할까요?", "AI 팀 시작", "모델·추론 설정", "시작하면 실시간 작업 화면 열기", "추론 강도"])
+                if scenario in ("empty", "embedded-empty"):
+                    expected.extend(["어떤 일을 함께 할까요?", "AI 팀 시작", "모델·추론 설정", "시작하면 실시간 작업 탭으로 이동", "추론 강도"])
                 elif scenario in PROFILE_SCENARIOS:
                     expected.extend([
                         "역할별 도구와 지침", "역할 저장", "설치 필요", "OpenCode",
@@ -381,12 +368,16 @@ def main() -> int:
                         "workspace-toolbar": ["Native workspace fixture", "계획", "수동 인수인계", "팀 관리 · 보고서", "workspace-ratio-65"],
                         "workspace-header": ["Claude Code · 계획", "claude-opus-5-5", "추론 high", "역할 자동 연결", "workspace-assign-left"],
                         "workspace-placeholder": ["앞 역할의 인수인계를 기다립니다", "실제 작업 화면이 나타납니다", "workspace-placeholder-left"],
-                        "workspace-picker": ["이 칸에 표시할 담당", "Claude Code · 현재 역할 따라가기", "계획 · Claude Code", "구현 · OpenCode", "검토 · Codex"],
+                        "workspace-picker": ["이 칸에 표시할 담당", "선택 접기", "Claude Code · 현재 역할 따라가기", "계획 · Claude Code", "구현 · OpenCode", "검토 · Codex"],
                     }[scenario])
                 else:
                     expected.append(f"Native {scenario} fixture")
                     if scenario != "history":
-                        expected.extend(["실시간 작업 화면 열기", "team-open-workspace", "team-current-model", "추론 강도"])
+                        expected.extend(["실시간 작업 탭 열기", "team-open-workspace", "team-current-model", "추론 강도"])
+                if scenario not in WORKSPACE_SCENARIOS and scenario != "empty":
+                    expected.append("팀 관리 · 다른 탭이나 Space에서도 진행을 유지합니다")
+                    if "team-close" in stdout:
+                        errors.append("an embedded manager still exposes the popup close control")
                 if scenario == "running":
                     expected.extend(["claude-opus-5-5", "높음 (high)", "현재 실행 설정"])
                 if scenario == "ready":

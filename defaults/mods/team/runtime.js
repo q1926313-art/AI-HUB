@@ -244,6 +244,13 @@ export function launcherArguments(platform, argv, prompt, shell, environment = {
 }
 
 export function createRuntime(host) {
+  const sourcePlacement = host.placement;
+  if (sourcePlacement != null && (typeof sourcePlacement !== "object" || Array.isArray(sourcePlacement)
+    || sourcePlacement.machine != null || !safeId(sourcePlacement.spaceId) || !safeId(sourcePlacement.tabId)))
+    throw new Error("팀 작업 위치: 이 컴퓨터의 유효한 공간·탭 ID가 필요합니다.");
+  // Native manager props supply the verified local destination. Snapshot it;
+  // opening a manager neither relocates old runs nor authorizes a launch.
+  const placement = sourcePlacement == null ? null : { spaceId: sourcePlacement.spaceId, tabId: sourcePlacement.tabId };
   const lockKey = (id) => (host.appHome?.() || "ai-hub") + "\n" + id;
   const now = () => host.now ? host.now() : Date.now();
   const getState = () => readState(host.shared(STATE_KEY));
@@ -458,7 +465,7 @@ export function createRuntime(host) {
     const attempt = (stage.attempt ?? 0) + 1;
     const launchKey = run.id + "-" + stage.id + "-" + attempt;
     patchStage(id, stage.id, { status: "launching", attempt, launchKey, terminal: null, report: null, error: null, reportError: null, terminalState: null, sawWorking: false, lastTurn: null, launchUncertain: false, startedAt: now(), finishedAt: null });
-    run = patchRun(id, { status: "running" });
+    run = patchRun(id, { status: "running", ...(placement || {}) });
     stage = run.stages.find((item) => item.id === stage.id);
     let sent = false;
     try {
@@ -497,7 +504,7 @@ export function createRuntime(host) {
       const command = agentArguments(stage, agent.run, shortTask, mode, capability);
       const environment = stage.agent === "claude" && stage.effort ? { CLAUDE_CODE_EFFORT_LEVEL: stage.effort } : {};
       const argv = launcherArguments(platform, command, undefined, shell, environment);
-      const tab = "aihub-" + run.id + "-" + stage.id + "-" + attempt;
+      const tab = run.tabId || "aihub-" + run.id + "-" + stage.id + "-" + attempt;
       const space = run.spaceId || "aihub-" + run.id;
       const args = ["run", "--bg", "--json", "--keep", "--no-parent", "--no-notify", "--cwd", run.folder,
         "--label", "herdr.space=" + space, "--label", "herdr.tab=" + tab,
@@ -641,7 +648,7 @@ export function createRuntime(host) {
       if (state.runs.length >= LIMITS.runs) throw new Error("팀 작업 기록이 " + LIMITS.runs + "개입니다. 완료된 작업을 기록 보관한 뒤 새 작업을 만들어 주세요.");
       const id = host.makeId ? host.makeId() : "team-" + now().toString(36) + "-" + Math.random().toString(36).slice(2, 9);
       if (!safeId(id) || state.runs.some((item) => item.id === id)) throw new Error("새 작업 ID를 만들지 못했습니다. 다시 시도해 주세요.");
-      const run = createRun({ ...input, profiles: input.profiles ?? state.profiles }, { id, now: now() });
+      const run = createRun({ ...input, ...(placement || {}), profiles: input.profiles ?? state.profiles }, { id, now: now() });
       runDirectory(run);
       store({ ...state, runs: [run, ...state.runs], selectedRunId: run.id });
       return run;
