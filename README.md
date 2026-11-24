@@ -65,20 +65,21 @@ AI에 전달되는 요청이며 운영체제의 쓰기 권한을 제한하는 �
 
 Windows x64용 패키지를 우선 배포합니다. PowerShell, Windows의 `curl.exe`와 `tar.exe`가 필요합니다.
 
-1. [Releases](https://github.com/q1926313-art/AI-HUB/releases)에서 Windows 배포본을 확인합니다.
-2. 배포본이 생성되어 있으면 PowerShell에서 다음 설치 명령을 실행합니다.
+1. [최신 안정 버전 ZIP](https://github.com/q1926313-art/AI-HUB/releases/latest/download/AI-Hub-windows-x86_64.zip)을 내려받습니다.
+2. ZIP 전체의 압축을 풀고, 풀린 폴더 안의 **`herdr-app/Install.cmd`**를 실행합니다.
+3. 설치가 끝나면 시작 메뉴의 **AI Hub**를 엽니다.
+
+기존 버전을 다시 설치할 때는 먼저 앱 창을 종료하세요. PowerShell에서 설치하려면
+정식 배포본에 포함된 설치 스크립트를 사용할 수도 있습니다.
 
 ```powershell
-irm https://raw.githubusercontent.com/q1926313-art/AI-HUB/main/distribution/install.ps1 | iex
+irm https://github.com/q1926313-art/AI-HUB/releases/latest/download/install.ps1 | iex
 ```
 
-설치 스크립트는 이 저장소의 배포 목록과 SHA-256을 확인하고, 기본적으로
-`%LOCALAPPDATA%\Programs\AI-Hub`에 설치한 뒤 **AI Hub** 시작 메뉴 바로가기를 만듭니다.
+PowerShell 설치 명령은 이 저장소의 배포 목록과 SHA-256을 확인해 패키지를 내려받습니다.
+기본 설치 위치는 `%LOCALAPPDATA%\Programs\AI-Hub`이며 **AI Hub** 시작 메뉴 바로가기를 만듭니다.
 필요한 `herdr-core` 실행 엔진이 없으면 공식 실행 엔진 설치 프로그램을 사용합니다.
-
-아직 Releases가 없다면 [Actions](https://github.com/q1926313-art/AI-HUB/actions)의
-Windows 빌드 결과를 확인하거나 아래 절차로 소스에서 빌드할 수 있습니다.
-빌드 중이거나 실패한 실행을 설치 성공으로 간주하지 마세요.
+버전별 파일과 변경 사항은 [Releases](https://github.com/q1926313-art/AI-HUB/releases)에서 확인할 수 있습니다.
 
 ## 사용
 
@@ -101,17 +102,27 @@ herdr-app --skill
 기존 도구의 격리 실행을 보존하기 위해 `HERDR_APP_HOME`이 명시되어 있으면 그 값을 우선합니다.
 `herdr-core`의 프로토콜, 공유 작업 문서, JavaScript 모듈 이름 `herdr`는 유지합니다.
 
-## 업데이트와 개인정보
+## 앱 업데이트
 
-- AI Hub 앱 업데이트는 **이 저장소의 GitHub Releases**를 확인합니다.
+설치된 Windows 패키지는 **이 저장소의 GitHub Releases**에서 새 버전을 자동으로 확인하고 내려받습니다.
+바로 확인하려면 **Settings → Updates → Check now**를 누르세요.
+다운로드가 준비되면 **Restart to update**를 눌러 새 버전으로 다시 엽니다.
+
+같은 설정 폴더를 사용하면 개인 설정, 사용자 정의 팀 역할과 기존 팀 작업 기록을 이어서 사용합니다.
+프로젝트 파일과 프로젝트 안의 팀 보고서는 재설치 대상에 포함되지 않습니다.
+역할 설정 변경은 새 팀 작업에 적용하며, 이미 만든 작업의 담당과 보고서는 유지합니다.
+
 - `herdr-core`는 별도 의존성이므로 공식 실행 엔진의 설치·업데이트 경로를 유지합니다.
 - 소스에서 직접 빌드한 개발용 앱은 기본적으로 자동 업데이트하지 않습니다.
-- 사용 통계 전송 주소는 기본값이 없습니다. 로컬 통계 및 기존 설정 기능은 남겨 두며,
-  외부 전송은 `AI_HUB_TELEMETRY_URL` 또는 명시적 호환용 환경변수를 설정한 경우에만 가능합니다.
-- 오류 보고의 기본 대상은 이 저장소입니다. 원본 프로젝트의 수집 서버로 자동 전송하지 않습니다.
 
 앱 업데이트용 테스트·미러 주소는 `AI_HUB_RELEASES_URL`, 실행 엔진용 주소는
 기존 `HERDR_RELEASES_URL`로 분리합니다. 두 주소는 서로 바꾸어 사용하지 않습니다.
+
+## 개인정보
+
+- 사용 통계 전송 주소는 기본값이 없습니다. 로컬 통계 및 기존 설정 기능은 남겨 두며,
+  외부 전송은 `AI_HUB_TELEMETRY_URL` 또는 명시적 호환용 환경변수를 설정한 경우에만 가능합니다.
+- 오류 보고의 기본 대상은 이 저장소입니다. 원본 프로젝트의 수집 서버로 자동 전송하지 않습니다.
 
 ## 소스에서 빌드
 
@@ -129,7 +140,10 @@ Windows에서는 MSVC 빌드 도구와 LLVM/libclang도 필요합니다.
 하위 모듈을 누락했다면 `git submodule update --init --recursive`로 받습니다.
 
 Windows 빌드 자동화는 실행 파일, 설치 스크립트, 라이선스가 포함된 산출물을 만듭니다.
-`v*` 태그를 사용하는 릴리스 흐름은 이 저장소에 배포 파일과 업데이트 목록을 게시합니다.
+`main`에 새 숫자 버전을 반영하면 같은 커밋의 Linux·macOS·Windows 검사와 Windows 패키징이
+통과한 뒤, 배포 파일과 태그 검증을 마친 정식 버전을 Releases에 자동 공개합니다.
+검사에 실패한 버전은 공개하지 않으며, 이미 공개한 버전을 다른 커밋으로 덮어쓰지 않습니다.
+버전을 올리는 방법과 재시도 조건은 [배포 관리 안내](docs/RELEASING.md)에 있습니다.
 상위 프로젝트의 서명 인증서나 배포용 비밀값은 사용하지 않습니다.
 
 ## 출처와 라이선스

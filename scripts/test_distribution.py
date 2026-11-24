@@ -7,6 +7,7 @@ Run: uv run --no-project python -m unittest discover -s scripts -p test_distribu
 
 import hashlib
 import os
+import plistlib
 import shutil
 import tarfile
 from pathlib import Path
@@ -232,16 +233,22 @@ printf 'dev PATH added' >> "$3"''')
                 self.assertIn("unexpected download", result.stderr)
                 self.assertNotIn("Intel Macs", result.stderr)
 
-    def test_packages_keep_full_notices_on_every_platform(self):
+    def test_packages_keep_full_notices_and_quoted_versions_on_every_platform(self):
         checkout = self.bin / "checkout"
         for path in [
-            "Cargo.toml", "LICENSE", "NOTICE", "THIRD-PARTY-NOTICES", "scripts/package",
+            "LICENSE", "NOTICE", "THIRD-PARTY-NOTICES", "scripts/package",
             "assets/icons/herdr-ui-icon-clean.svg", "assets/icons/Herdr.icns",
             "distribution/install-local.ps1", "distribution/Install.cmd",
         ]:
             destination = checkout / path
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / path, destination)
+        version = "0.1.18"
+        # Keep comments (including quotes and hyphens) out of the package and plist versions.
+        (checkout / "Cargo.toml").write_text(
+            '[package]\nname = "herdr-app"\n'
+            f'version = "{version}" # AI Hub modification: "release" fixture (2026-11-24).\n'
+        )
         sign = checkout / "scripts/mac-sign"
         sign.write_text("#!/bin/sh\nexit 0\n")
         sign.chmod(0o755)
@@ -258,12 +265,17 @@ printf 'dev PATH added' >> "$3"''')
             with self.subTest(target=target):
                 result = self.run_script(checkout / "scripts/package", os_name, arch)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f"package: AI Hub {version} for {target}", result.stdout.splitlines())
                 with tarfile.open(checkout / f"dist/AI-Hub-{target}.tar.gz") as archive:
                     for name in ("LICENSE", "NOTICE", "THIRD-PARTY-NOTICES"):
                         self.assertEqual(
                             archive.extractfile(f"{prefix}/{name}").read(),
                             (ROOT / name).read_bytes(),
                         )
+                    if target == "macos-aarch64":
+                        plist = plistlib.loads(archive.extractfile("Herdr.app/Contents/Info.plist").read())
+                        self.assertEqual(plist["CFBundleShortVersionString"], version)
+                        self.assertEqual(plist["CFBundleVersion"], version)
                     if target == "windows-x86_64":
                         self.assertEqual(archive.extractfile("herdr-app/Install.ps1").read(), (ROOT / "distribution/install-local.ps1").read_bytes())
                         self.assertEqual(archive.extractfile("herdr-app/Install.cmd").read(), (ROOT / "distribution/Install.cmd").read_bytes())

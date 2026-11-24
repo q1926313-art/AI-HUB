@@ -2,6 +2,15 @@
 
 <!-- AI Hub fork modification, 2026-11-24. Earlier entries below are retained upstream history. -->
 
+## [0.1.18] - 2026-11-24
+<!-- spotlight windows -->
+
+### New
+
+- **검사를 통과한 Windows 버전을 자동 배포합니다.** 플랫폼 검사와 패키지 검증을 마친 버전을 Releases에서 내려받고, ZIP을 푼 뒤 `herdr-app/Install.cmd`로 설치할 수 있습니다.
+- **앱 안에서 업데이트를 확인하고 적용합니다.** 설치된 앱의 Settings → Updates → Check now에서 새 버전을 확인하고, 준비되면 Restart to update로 다시 엽니다.
+- **설정한 AI 팀을 이어서 사용합니다.** 최대 8개 역할의 이름·순서·지침·담당 도구와 모델을 구성하는 기능을 유지하며, 같은 설정 폴더의 사용자 정의 역할과 기존 작업 기록을 보존합니다.
+
 ## [0.1.17-aihub.3] - 2026-11-24
 <!-- spotlight -->
 

@@ -786,8 +786,13 @@ What's about the user, never a look:
   precedence as fonts.
 - `appearance`: `"light"` or `"dark"` always; absent, the system's. A layout
   with a light and a dark theme shows the matching one.
-- Updates: an installed app downloads them by itself and offers Restart and
-  What changed. If the app crashes or is killed with a verified newer update
+- Updates: an installed AI Hub release checks this repository's GitHub Releases
+  (`https://github.com/q1926313-art/AI-HUB/releases`) and downloads newer app packages.
+  Use Settings → Updates → Check now (`app.check_updates`), then Restart to update
+  (`app.update`) when the download is ready. What changed opens the release notes.
+  Using the same app home preserves personal settings, custom team profiles and
+  recorded team runs; the installer does not replace project files or team reports.
+  If the app crashes or is killed with a verified newer update
   waiting, the next launch installs it before opening a window. The first
   start after an app update also updates herdr-core
   to the latest release of the same generation, keeping terminals running.
@@ -798,7 +803,8 @@ What's about the user, never a look:
   its What's new button opens the waiting update's release range, or this
   version's notes, in the What's new window. Reading never clears the waiting-update dot.
   Rare spotlight releases open What’s new after restart, once; otherwise a
-  quiet Updated pill lasts for that launch. A build from source never updates.
+  quiet Updated pill lasts for that launch. Development builds from source do not
+  auto-update the app by default. herdr-core keeps its separate upstream release feed.
   Curated notes come from the bundled root `CHANGELOG.md`; remote notes and
   media are optional. `update-notes.json` records the last successful app
   version and presented spotlights; `update-notes-cache.md` caches remote

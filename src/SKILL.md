@@ -21,8 +21,15 @@ prints the built-in command list even without an open window. Do not launch bare
 signal or restart the person's app or core. A window closing does not kill
 its terminals.
 
-`app.check_updates` checks for newer releases. Settings reports "Up to date"
-only after a successful check; on failure, check the connection and retry.
+`app.check_updates` is Settings → Updates → Check now. Installed AI Hub packages
+check `https://github.com/q1926313-art/AI-HUB/releases` for app updates; herdr-core
+keeps its separate upstream feed. When a download is ready, Restart to update
+(`app.update`) applies it. Do not restart the person's app without their request.
+Development builds from source do not auto-update the app by default.
+Keeping the same app home preserves personal settings, custom team profiles and
+recorded runs; reinstalling does not replace project files or team reports.
+Settings reports "Up to date" only after a successful check;
+on failure, check the connection and retry.
 Package-managed cores are checked but updated through their package manager.
 Dismiss a core update error with its × or `overlay.close {id:"core-update-error"}`;
 it stays dismissed until the error changes or the update recovers.

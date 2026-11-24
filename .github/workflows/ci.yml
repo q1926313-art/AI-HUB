@@ -142,6 +142,7 @@ jobs:
         run: |
           python3 -m unittest discover -s scripts -p test_distribution.py
           python3 -m unittest discover -s scripts -p test_prepare_release.py
+          python3 -m unittest discover -s scripts -p test_publish_release.py
       - name: Install Bun
         if: matrix.platform == 'linux-x86_64'
         run: curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.4"
