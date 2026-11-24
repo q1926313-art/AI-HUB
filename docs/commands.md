@@ -101,6 +101,17 @@ Move a tab (the active one if no id) to a position in its space (1 = first), or 
 | `index` | no |
 | `by` | no |
 
+## `tab.layout`
+
+Read one tab's layout, or replace it with a row/column tree of terminal/mod panes when expected still matches. Keep existing terminals in the tree (hidden archives are allowed). Moving a terminal from elsewhere requires an explicit adopt entry with matching labels. Never starts or ends a terminal.
+
+| Argument | Required |
+|---|---|
+| `id` | yes |
+| `layout` | no |
+| `expected` | no |
+| `adopt` | no |
+
 ## `pane.split`
 
 Split a pane (default: the focused one) "right" or "down" with a new terminal, or with a mod (`mod`, its `props`) beside it.
@@ -489,7 +500,7 @@ Reset a shipped layout and its clicks (the old file is kept aside).
 
 ## `mod.open`
 
-Toggle a mod as the overlay its mod.json describes; calling again closes it.
+Open a mod as its mod.json describes: space selects its persistent owned Space without starting a shell; otherwise overlay toggles it.
 
 | Argument | Required |
 |---|---|
