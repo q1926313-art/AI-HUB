@@ -192,7 +192,7 @@ def publish(github, root, dist, repository, sha, ref):
         if existing_sha != sha:
             raise RuntimeError("the published release tag is missing or changed")
         print(f"Already published; preserving its tag, assets and latest status: {release['html_url']}")
-        return release["html_url"]
+        return release["html_url"], False
     require_newer(github, repository, version)
     notes = release_notes(root, version, sha, ci_url)
     if existing_sha is None:
@@ -227,7 +227,7 @@ def publish(github, root, dist, repository, sha, ref):
         "body": notes, "draft": False, "prerelease": False, "make_latest": "true",
     })
     print(f"Published complete verified release: {published['html_url']}")
-    return published["html_url"]
+    return published["html_url"], True
 
 
 def main():
@@ -248,7 +248,10 @@ def main():
     if args.wait_for_ci:
         wait_for_ci(github, args.repository, args.sha, args.ref)
     else:
-        url = publish(github, ROOT, args.dist, args.repository, args.sha, args.ref)
+        url, newly_published = publish(github, ROOT, args.dist, args.repository, args.sha, args.ref)
+        if os.environ.get("GITHUB_OUTPUT"):
+            with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                output.write(f"published={str(newly_published).lower()}\n")
         if os.environ.get("GITHUB_STEP_SUMMARY"):
             with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
                 summary.write(f"## AI Hub release\n\n[Download and update]({url})\n")

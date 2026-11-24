@@ -125,12 +125,14 @@ jobs:
           name: AI-Hub-windows-x86_64
           path: dist
       - name: Publish complete GitHub release
+        id: publication
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/publish_release.py
       - name: Verify public downloads and the installed app update feed
         env:
           GH_TOKEN: ${{ github.token }}
+          NEWLY_PUBLISHED: ${{ steps.publication.outputs.published }}
         run: |
           version=$(python3 -c 'import json; print(json.load(open("dist/latest.json"))["version"])')
           base="https://github.com/$GITHUB_REPOSITORY/releases/download/v$version"
@@ -140,12 +142,28 @@ jobs:
             name=$(basename "$file")
             curl --fail --silent --show-error --location --retry 5 --retry-delay 3 --retry-all-errors --max-time 120 "$base/$name" --output "$downloaded/$name"
           done
-          cmp dist/SHA256SUMS.txt "$downloaded/SHA256SUMS.txt"
+          # Rebuilding the same commit can change archive timestamps. A no-op
+          # must verify the preserved published bundle, not replace it.
+          if [[ "$NEWLY_PUBLISHED" == true ]]; then
+            cmp dist/SHA256SUMS.txt "$downloaded/SHA256SUMS.txt"
+          fi
           (cd "$downloaded" && sha256sum --check SHA256SUMS.txt)
+          python3 - "$downloaded" "$version" "$base" <<'PY'
+          import hashlib, json, sys
+          from pathlib import Path
+          folder, version, base = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+          manifest = json.loads((folder / "latest.json").read_text())
+          assert manifest["version"] == version, "published version mismatch"
+          archive = folder / "AI-Hub-windows-x86_64.tar.gz"
+          assert manifest["targets"] == {"windows-x86_64": {
+              "url": f"{base}/{archive.name}",
+              "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+          }}, "published update manifest mismatch"
+          PY
           latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
           if [[ "$latest" == "v$version" ]]; then
             curl --fail --silent --show-error --location --retry 5 --retry-delay 3 --retry-all-errors --max-time 120 "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json" --output "$downloaded/latest-feed.json"
-            cmp dist/latest.json "$downloaded/latest-feed.json"
+            cmp "$downloaded/latest.json" "$downloaded/latest-feed.json"
             echo "Public update feed and all release assets verified for $version."
           else
             echo "Versioned assets verified; preserving newer latest release $latest."

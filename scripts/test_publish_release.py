@@ -172,7 +172,7 @@ class PublisherTests(unittest.TestCase):
 
     def test_complete_bundle_publishes_stable_release_at_the_verified_commit(self):
         github = FakeGitHub()
-        url = self.run_publish(github)
+        url, newly_published = self.run_publish(github)
         self.assertEqual(github.tags[TAG], {"type": "commit", "sha": SHA})
         self.assertEqual(github.latest, TAG)
         self.assertEqual(len(github.publications), 1)
@@ -183,6 +183,7 @@ class PublisherTests(unittest.TestCase):
         self.assertIn(SHA, release["body"])
         self.assertIn(ci_run()["html_url"], release["body"])
         self.assertEqual(url, release["html_url"])
+        self.assertTrue(newly_published)
 
     def test_ci_from_a_pr_fork_other_branch_or_other_commit_cannot_authorize_publication(self):
         invalid = [
@@ -223,8 +224,10 @@ class PublisherTests(unittest.TestCase):
         github.tags[TAG] = {"type": "commit", "sha": SHA}
         github.seed_release(draft=False, assets=[{"name": "preserve-published-assets"}])
         github.latest = "v0.1.19"
+        github.main = OTHER_SHA
         before = copy.deepcopy(github.releases)
-        self.run_publish(github)
+        result = self.run_publish(github, f"refs/tags/{TAG}")
+        self.assertEqual(result, (github.releases[TAG]["html_url"], False))
         self.assertEqual(github.writes, [])
         self.assertEqual(github.uploads, [])
         self.assertEqual(github.releases, before)
