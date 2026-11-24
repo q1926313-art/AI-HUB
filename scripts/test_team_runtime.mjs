@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRuntime, reportFile, launcherArguments, agentArguments, parseModelList, parseCodexModelCache, parseOpenCodeModelMetadata, capturedArguments } from "../defaults/mods/team/runtime.js";
@@ -1086,11 +1086,16 @@ test("real Windows launch and query restore literal cwd after startup cd and sto
     const project = join(directory, "한글 [literal] & O'Brien");
     const startupFolder = join(directory, "profile-folder");
     mkdirSync(project); mkdirSync(startupFolder);
+    // Windows may expose the same directory as RUNNER~1 or runneradmin.
+    // Distinct files read relative to the child's cwd prove directory identity
+    // without depending on either spelling or weakening the drift control.
+    writeFileSync(join(project, ".aihub-cwd-fixture"), "selected-project");
+    writeFileSync(join(startupFolder, ".aihub-cwd-fixture"), "profile-startup");
     writeFileSync(join(directory, "capture-cwd.cjs"), [
-      "require('node:fs').writeFileSync(process.env.AI_HUB_TEST_CALLED, 'called');",
+      "const fs = require('node:fs'); fs.writeFileSync(process.env.AI_HUB_TEST_CALLED, 'called');",
       "if (process.argv.includes('--fail')) process.exit(7);",
       // ASCII output keeps PS5's console encoding separate from Unicode cwd/argv.
-      "console.log(Buffer.from(JSON.stringify({cwd:process.cwd(),args:process.argv.slice(2),profile:process.env.AI_HUB_TEST_PROFILE,effort:process.env.CLAUDE_CODE_EFFORT_LEVEL}),'utf8').toString('base64'));",
+      "console.log(Buffer.from(JSON.stringify({cwd:process.cwd(),directory:fs.readFileSync('.aihub-cwd-fixture','utf8'),args:process.argv.slice(2),profile:process.env.AI_HUB_TEST_PROFILE,effort:process.env.CLAUDE_CODE_EFFORT_LEVEL}),'utf8').toString('base64'));",
     ].join("\n") + "\n");
     const shim = join(directory, "opencode.cmd");
     writeFileSync(shim, '@echo off\r\n"' + process.execPath + '" "%~dp0capture-cwd.cjs" %*\r\n');
@@ -1121,14 +1126,14 @@ test("real Windows launch and query restore literal cwd after startup cd and sto
       const drifted = invoke(undefined);
       assert.equal(drifted.status, 0, shell + " " + mode + " control: " + (drifted.stderr || String(drifted.error)));
       const old = JSON.parse(Buffer.from(drifted.stdout.trim().split(/\r?\n/)[0], "base64").toString("utf8"));
-      assert.equal(realpathSync(old.cwd).toLowerCase(), realpathSync(startupFolder).toLowerCase(),
-        "omitted-cwd control must reproduce the profile's directory drift");
+      assert.equal(old.directory, "profile-startup",
+        "omitted-cwd control must reproduce the profile's directory drift: " + old.cwd);
       const launched = invoke(project);
       assert.equal(launched.status, 0, shell + " " + mode + ": " + (launched.stderr || String(launched.error)));
       assert.equal(existsSync(marker), true);
       const lines = launched.stdout.trim().split(/\r?\n/);
       const observed = JSON.parse(Buffer.from(lines[0], "base64").toString("utf8"));
-      assert.equal(realpathSync(observed.cwd).toLowerCase(), realpathSync(project).toLowerCase(), shell + " " + mode);
+      assert.equal(observed.directory, "selected-project", shell + " " + mode + ": " + observed.cwd);
       assert.deepEqual(observed.args, expected);
       assert.equal(observed.profile, "profile-kept", "the startup environment survives");
       assert.equal(observed.effort, mode === "launch" ? "xhigh" : "low");
