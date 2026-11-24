@@ -59,7 +59,7 @@ git clone --recurse-submodules https://github.com/q1926313-art/AI-HUB.git
 담당 도구·모델을 편집할 수 있게 합니다. OpenCode 모델 목록 조회와 전용 시작 인자를 추가하고,
 기본 구현 담당을 OpenCode Go의 DeepSeek로 바꿉니다. 기존 실행 기록의 담당과 보고서는 유지합니다.
 
-`0.1.18`은 첫 자동 정식 배포 버전입니다. `main`의 증가한 숫자 버전에 대해 동일 커밋의
+`0.1.19`는 첫 자동 정식 배포 버전입니다. `main`의 증가한 숫자 버전에 대해 동일 커밋의
 세 운영체제 검사와 Windows 패키징을 확인하고, 초안의 파일·SHA-256·태그를 검증한 뒤
 GitHub Releases에 공개합니다. 공개한 버전은 다른 커밋이나 파일로 덮어쓰지 않습니다.
 최신 Windows ZIP 설치와 앱 안의 **Check now → Restart to update** 절차를 문서화하며,

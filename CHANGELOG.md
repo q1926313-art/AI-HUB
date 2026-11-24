@@ -2,7 +2,7 @@
 
 <!-- AI Hub fork modification, 2026-11-24. Earlier entries below are retained upstream history. -->
 
-## [0.1.18] - 2026-11-24
+## [0.1.19] - 2026-11-24
 <!-- spotlight windows -->
 
 ### New

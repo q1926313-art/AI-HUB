@@ -154,6 +154,25 @@ def tag_commit(github, repository, tag):
     raise RuntimeError("the release tag does not resolve to a commit")
 
 
+def release_for_tag(github, repository, tag):
+    # GitHub's tag endpoint returns published releases only. Authenticated
+    # listings also include drafts, which must be resumed rather than recreated.
+    release = github.api(f"repos/{repository}/releases/tags/{tag}", missing=True)
+    if release is not None:
+        return release
+    page = 1
+    while True:
+        releases = github.api(f"repos/{repository}/releases?per_page=100&page={page}")
+        matches = [item for item in releases if item.get("tag_name") == tag]
+        if len(matches) > 1:
+            raise RuntimeError("multiple releases use this tag; inspect them before publishing")
+        if matches:
+            return matches[0]
+        if len(releases) < 100:
+            return None
+        page += 1
+
+
 def require_newer(github, repository, version):
     latest = github.api(f"repos/{repository}/releases/latest", missing=True)
     if latest is not None and version_key(version) <= version_key(latest["tag_name"].removeprefix("v")):
@@ -187,7 +206,7 @@ def publish(github, root, dist, repository, sha, ref):
     existing_sha = tag_commit(github, repository, tag)
     if existing_sha is not None and existing_sha != sha:
         raise RuntimeError(f"{tag} already belongs to another commit; bump Cargo.toml, Cargo.lock and CHANGELOG.md")
-    release = github.api(f"repos/{repository}/releases/tags/{tag}", missing=True)
+    release = release_for_tag(github, repository, tag)
     if release is not None and not release["draft"]:
         if existing_sha != sha:
             raise RuntimeError("the published release tag is missing or changed")
@@ -205,8 +224,12 @@ def publish(github, root, dist, repository, sha, ref):
     # Only this same-commit draft may be repaired. Published assets are untouched.
     if any(asset["name"] not in ASSETS for asset in release.get("assets", [])):
         raise RuntimeError("unexpected assets in the draft; inspect it before publishing")
+    release_id = release["id"]
     github.upload(repository, tag, [files[name] for name in sorted(files)])
-    release = github.api(f"repos/{repository}/releases/tags/{tag}")
+    # Drafts are readable by their authenticated release ID, not by tag.
+    release = github.api(f"repos/{repository}/releases/{release_id}")
+    if release["id"] != release_id or release["tag_name"] != tag:
+        raise RuntimeError("the release identity changed during upload; publication stopped")
     assets = release["assets"]
     if not release["draft"] or len(assets) != len(files) or {asset["name"] for asset in assets} != files.keys():
         raise RuntimeError("the complete asset set must remain in a draft until verified")

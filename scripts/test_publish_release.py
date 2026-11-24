@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlsplit
 
 from prepare_release import NOTICES, prepare
 from publish_release import ASSETS, GitHub, publish, wait_for_ci
@@ -46,6 +47,7 @@ class FakeGitHub:
         self.tag_objects = {}
         self.releases = {}
         self.latest = None
+        self.reads = []
         self.writes = []
         self.uploads = []
         self.upload_fault = None
@@ -66,6 +68,7 @@ class FakeGitHub:
         if method != "GET":
             self.writes.append((method, route, copy.deepcopy(data)))
         if method == "GET":
+            self.reads.append(route)
             if route.startswith("actions/workflows/ci.yml/runs?"):
                 value = {"workflow_runs": self.runs}
             elif route == "git/ref/heads/main":
@@ -79,6 +82,18 @@ class FakeGitHub:
                 value = None if self.latest is None else {"tag_name": self.latest}
             elif route.startswith("releases/tags/"):
                 value = self.releases.get(route.removeprefix("releases/tags/"))
+                # The real tag endpoint exposes only published releases.
+                if value is not None and value["draft"]:
+                    value = None
+            elif route.startswith("releases?"):
+                query = parse_qs(urlsplit(route).query)
+                size = min(int(query.get("per_page", [30])[0]), 100)
+                page = int(query.get("page", [1])[0])
+                releases = sorted(self.releases.values(), key=lambda item: item["id"], reverse=True)
+                value = releases[(page - 1) * size:page * size]
+            elif route.startswith("releases/"):
+                release_id = int(route.removeprefix("releases/"))
+                value = next((item for item in self.releases.values() if item["id"] == release_id), None)
             else:
                 raise AssertionError(f"unexpected GET: {route}")
             if value is None and not missing:
@@ -91,6 +106,8 @@ class FakeGitHub:
             self.tags[tag] = {"type": "commit", "sha": data["sha"]}
             return {"object": copy.deepcopy(self.tags[tag])}
         if method == "POST" and route == "releases":
+            if data["tag_name"] in self.releases:
+                raise RuntimeError("a release for this tag already exists")
             self.seed_release(draft=data["draft"])
             self.releases[TAG].update(data)
             return copy.deepcopy(self.releases[TAG])
@@ -232,6 +249,7 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(github.uploads, [])
         self.assertEqual(github.releases, before)
         self.assertEqual(github.latest, "v0.1.19")
+        self.assertFalse(any(route.startswith("releases?") for route in github.reads))
 
     def test_existing_version_cannot_be_reassigned_to_another_commit(self):
         github = FakeGitHub()
@@ -258,6 +276,25 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(github.releases[TAG]["id"], 42)
         self.assertFalse(any(method == "POST" for method, _, _ in github.writes))
         self.assertEqual(len(github.publications), 1)
+
+    def test_draft_resume_finds_the_exact_tag_beyond_the_first_listing_page(self):
+        github = FakeGitHub()
+        github.tags[TAG] = {"type": "commit", "sha": SHA}
+        # These authenticated drafts fill the first page, including a tag that
+        # starts with the desired version but belongs to a different release.
+        for number in range(100):
+            tag = f"{TAG}{number}"
+            github.releases[tag] = {
+                "id": 1000 + number, "tag_name": tag, "draft": True,
+                "assets": [{"name": "reserved-draft-asset"}],
+            }
+        unrelated = copy.deepcopy(github.releases)
+        github.seed_release(draft=True, assets=[{"name": "latest.json"}])
+        self.run_publish(github)
+        self.assertEqual(github.releases[TAG]["id"], 42)
+        self.assertEqual(len(github.publications), 1)
+        self.assertFalse(any(method == "POST" for method, _, _ in github.writes))
+        self.assertEqual({tag: value for tag, value in github.releases.items() if tag != TAG}, unrelated)
 
     def test_partial_interrupted_or_unverified_uploads_remain_drafts(self):
         for fault in ("partial", "interrupted", "hash", "missing-hash", "size"):
