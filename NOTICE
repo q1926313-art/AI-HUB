@@ -1,0 +1,20 @@
+AI Hub
+
+AI Hub is an independently maintained distribution of the Herdr desktop app.
+It is not an official release of the original Herdr project.
+
+Original project: https://github.com/herdrdev/herdr-app
+Imported revision: 2d1464e02ddad5484eaaf9a5b59b594e3930aeba
+Original package version: 0.1.17
+Fork repository: https://github.com/q1926313-art/AI-HUB
+
+The original Apache License 2.0, copyright and attribution notices, dependency
+licenses, and THIRD-PARTY-NOTICES are retained. See LICENSE, licenses/,
+THIRD-PARTY-NOTICES, and the notices distributed with individual assets.
+
+Fork modifications dated 2026-11-24: AI Hub user-facing branding, separate
+default settings directory and Windows installation identity, fork-owned app
+updates and build/release automation, fork documentation, and explicitly
+configured telemetry/feedback destinations. See docs/UPSTREAM.md and the Git
+history for the modified files. The herdr-core runtime, protocol identifiers,
+JavaScript module API, and compatibility CLI name remain upstream-compatible.
