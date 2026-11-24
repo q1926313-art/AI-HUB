@@ -2,8 +2,8 @@
 import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { theme, props, checking, shared, setShared, closeOverlay, openOverlay, terminals } from "herdr";
-import { readState, activeStage, STATE_KEY } from "../team/model.js";
-import { WORKSPACE_KEY, TOOL_NAMES, choicesFor, dismissWorkspace, changeWorkspace } from "../team/workspace.js";
+import { readState, activeStage, STATE_KEY } from "./model.js";
+import { WORKSPACE_KEY, TOOL_NAMES, choicesFor, dismissWorkspace, changeWorkspace } from "./workspace.js";
 
 const STATUS = { pending: "대기", launching: "연결 확인 중", running: "작업 중", ready: "보고서 확인 필요", completed: "완료", stopped: "중지됨", error: "확인 필요" };
 const host = { shared, setShared };
@@ -11,7 +11,7 @@ const toolName = (stage, binding) => TOOL_NAMES[stage?.agent] ?? stage?.agent ??
 
 export default class Workspace extends View {
   init(_props, cx) {
-    this.info = props() ?? {};
+    this.info = _props?.view === "workspace" ? _props : props() ?? {};
     this.isCheck = checking();
     if (!this.isCheck) cx.timer.every(1000, (cx) => cx.notify());
   }
@@ -39,8 +39,8 @@ export default class Workspace extends View {
   }
 
   picker(binding) {
-    openOverlay({ mod: "team-workspace", kind: "popup", width: 340, height: 420,
-      props: { ...this.info, role: "picker", binding } });
+    openOverlay({ mod: "team", kind: "popup", width: 340, height: 420,
+      props: { ...this.info, view: "workspace", role: "picker", binding } });
   }
 
   toolbar(t, current) {

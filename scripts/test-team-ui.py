@@ -237,13 +237,12 @@ export default class NativeTeamFixture extends Team {
 
 
 def workspace_fixture_entry(role: str) -> str:
-    """Check actual workspace chrome without a process, live terminal, or writes."""
-    return """import Workspace from './mods/team-workspace/main.js';
+    """Check the real routed entry without a process, live terminal, or writes."""
+    return """import Team from './mods/team/main.js';
 import { createRun, defaultProfiles, updateStage } from './mods/team/model.js';
 
-export default class NativeWorkspaceFixture extends Workspace {
+export default class NativeWorkspaceFixture extends Team {
   init(props, cx) {
-    super.init(props, cx);
     const role = ROLE;
     const profiles = defaultProfiles();
     profiles[0].model = 'claude-opus-5-5';
@@ -256,9 +255,21 @@ export default class NativeWorkspaceFixture extends Workspace {
       current = updateStage(current, 'plan', { status: 'launching', attempt: 1 }, current.updatedAt + 1);
       current = updateStage(current, 'plan', { status: 'running', terminal: 't-native-workspace' }, current.updatedAt + 1);
     }
-    this.info = { role, runId: current.id, owner: 'native-check', generation: 1,
+    const info = { view: 'workspace', role, runId: current.id, owner: 'native-check', generation: 1,
       binding: { slot: 'left', choice: 'agent:claude', stageId: 'plan', attempt: current.stages[0].attempt, terminal: null } };
-    this.current = () => current;
+    super.init(info, cx);
+    if (!this.workspaceView || this.workspaceView.info.view !== 'workspace'
+      || this.workspaceView.info.role !== role || this.runtime !== undefined
+      || this.workspace !== undefined || this.armed !== undefined || this.titleInput !== undefined) {
+      throw new Error('A workspace route initialized the Team controller or lost its role props.');
+    }
+    this.workspaceView.current = () => current;
+    let closed = false;
+    const actualClose = this.workspaceView.close.bind(this.workspaceView);
+    this.workspaceView.close = () => { closed = true; actualClose(); };
+    this.close();
+    this.workspaceView.close = actualClose;
+    if (!closed || this.closed !== undefined) throw new Error('Workspace close did not delegate to the display view.');
   }
 }
 """.replace("ROLE", json.dumps(role))

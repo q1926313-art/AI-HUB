@@ -9,6 +9,7 @@ import { defaultProfiles, readState, activeStage, nextStage } from "./model.js";
 import { createRuntime } from "./runtime.js";
 import { modelOptions, effortOptions, effortProblem } from "./options.js";
 import { createWorkspace } from "./workspace.js";
+import WorkspaceView from "./workspace-view.js";
 
 const TOOL_NAMES = { claude: "Claude Code", codex: "Codex", opencode: "OpenCode" };
 const MODEL_TOOLS = new Set(["claude", "codex", "opencode"]);
@@ -41,6 +42,12 @@ function localProject() {
 
 export default class Team extends View {
   init(_props, cx) {
+    const entryProps = _props?.view === "workspace" ? _props : props();
+    if (entryProps?.view === "workspace") {
+      this.workspaceView = new WorkspaceView();
+      this.workspaceView.init(entryProps, cx);
+      return;
+    }
     this.isCheck = checking();
     this.runtime = this.isCheck ? null : createRuntime({
       shared, setShared, hc, exec, run, knownAgents, readTextFile, writeTextFile, appHome, home, window,
@@ -394,6 +401,7 @@ export default class Team extends View {
   }
 
   close() {
+    if (this.workspaceView) { this.workspaceView.close(); return; }
     this.closed = true;
     this.stopAutomatic();
     this.closeWorkspace();
@@ -1024,7 +1032,8 @@ export default class Team extends View {
       .child(div().pt(6).text_size(11).text_color(t.dim).child("기록을 여는 것만으로 AI를 다시 실행하지 않습니다."));
   }
 
-  render() {
+  render(cx) {
+    if (this.workspaceView) return this.workspaceView.render(cx);
     if (!this.isCheck) this.state = this.runtime.getState();
     const t = theme();
     const current = this.currentRun();

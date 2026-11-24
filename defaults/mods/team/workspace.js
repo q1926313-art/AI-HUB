@@ -67,7 +67,7 @@ export function workspaceLayout(current, live, prefs, owner, generation) {
   const selected = preferences(current, prefs);
   const common = { runId: current.id, owner, generation };
   const bindings = bindingsFor(current, live, selected);
-  const mod = (role, extra = {}) => ({ mod: "team-workspace", props: { ...common, role, ...extra } });
+  const mod = (role, extra = {}) => ({ mod: "team", props: { ...common, view: "workspace", role, ...extra } });
   const pane = (slot) => {
     const binding = bindings.find((item) => item.slot === slot);
     return {

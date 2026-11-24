@@ -94,7 +94,8 @@ test("custom tools and role names populate the assignment choices", () => {
 test("unstarted roles have placeholders, never fabricated output or new launches", () => {
   const current = fixture();
   const layout = workspaceLayout(current, [], null, "test-owner", 1);
-  assert.equal(layout.children[1].children[0].children[1].content.mod, "team-workspace");
+  assert.equal(layout.children[1].children[0].children[1].content.mod, "team");
+  assert.equal(layout.children[1].children[0].children[1].content.props.view, "workspace");
   assert.equal(layout.children[1].children[0].children[1].content.props.role, "placeholder");
 });
 
