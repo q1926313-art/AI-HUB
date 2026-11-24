@@ -9,8 +9,8 @@ using System.Security.Cryptography;
 using System.Windows.Forms;
 using System.Web.Script.Serialization;
 
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyFileVersion("1.0.1.0")]
 
 static class GitHubUpdate
 {
@@ -22,7 +22,6 @@ static class GitHubUpdate
     internal sealed class Release
     {
         public Version Version;
-        public string Url;
         public string Digest;
     }
 
@@ -57,7 +56,6 @@ static class GitHubUpdate
                     throw new IOException("릴리스에 SHA-256 정보가 없습니다.");
                 return new Release {
                     Version = version,
-                    Url = "https://github.com/" + Repository + "/releases/download/" + Uri.EscapeDataString(tag) + "/" + Asset,
                     Digest = digest.Substring(7)
                 };
             }
@@ -73,26 +71,9 @@ static class GitHubUpdate
         return client;
     }
 
-    internal static string Stage(Release release)
+    internal static void StartInstaller(Release release)
     {
         string id = Guid.NewGuid().ToString("N");
-        string candidate = Candidate(Application.ExecutablePath, id);
-        try
-        {
-            using (var client = Client()) client.DownloadFile(release.Url, candidate);
-            CheckCandidate(candidate, release.Version, release.Digest);
-            UpdateVerifier.Verify(candidate);
-            return id;
-        }
-        catch
-        {
-            Delete(candidate);
-            throw;
-        }
-    }
-
-    internal static void StartInstaller(string id, Release release)
-    {
         string target = Application.ExecutablePath;
         string helper = Path.Combine(Path.GetDirectoryName(target), Prefix + id + ".helper.exe");
         try
@@ -107,7 +88,7 @@ static class GitHubUpdate
         catch
         {
             Delete(helper);
-            Delete(Candidate(target, id));
+
             throw;
         }
     }
@@ -115,6 +96,7 @@ static class GitHubUpdate
     internal static int Apply(string[] args)
     {
         string candidate = null;
+        string restartTarget = null;
         try
         {
             Guid id;
@@ -135,15 +117,20 @@ static class GitHubUpdate
                     if (!parent.HasExited && parent.StartTime.ToFileTimeUtc() == Int64.Parse(args[2]) && !parent.WaitForExit(30000))
                         throw new IOException("프로그램 종료 시간이 초과되었습니다.");
 
+            restartTarget = target;
             if (version <= AssemblyName.GetAssemblyName(target).Version)
                 throw new IOException("이미 같은 버전 또는 더 최신 버전이 설치되어 있습니다.");
+            string tag = "v" + version.ToString(3);
+            string url = "https://github.com/" + Repository + "/releases/download/" + tag + "/" + Asset;
+            using (var client = Client()) client.DownloadFile(url, candidate);
             CheckCandidate(candidate, version, args[5]);
+            UpdateVerifier.Verify(candidate);
             string backup = target + "." + id.ToString("N") + ".bak";
             File.Replace(candidate, target, backup);
             try
             {
                 UpdateVerifier.Verify(target);
-                using (Process.Start(new ProcessStartInfo(target) { UseShellExecute = false, WorkingDirectory = directory })) { }
+                Restart(target);
             }
             catch
             {
@@ -154,7 +141,13 @@ static class GitHubUpdate
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "업데이트 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            string message = ex.Message;
+            if (restartTarget != null)
+            {
+                try { Restart(restartTarget); }
+                catch (Exception restartError) { message += Environment.NewLine + restartError.Message; }
+            }
+            MessageBox.Show(message, "업데이트 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 1;
         }
         finally { Delete(candidate); }
@@ -172,7 +165,12 @@ static class GitHubUpdate
         catch (UnauthorizedAccessException) { }
     }
 
-    internal static void Discard(string id) { Delete(Candidate(Application.ExecutablePath, id)); }
+    static void Restart(string target)
+    {
+        using (Process.Start(new ProcessStartInfo(target) {
+            UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(target)
+        })) { }
+    }
 
     static string Candidate(string target, string id)
     {
